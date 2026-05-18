@@ -1,0 +1,6 @@
+2026-05-17 21:58:26,148 | INFO | review_analyzer | Logging initialized
+2026-05-17 21:58:26,148 | INFO | review_analyzer | Streamlit app started
+2026-05-17 21:58:26,154 | INFO | review_analyzer | Analysis settings: method=transformer use_spacy_aspects=False has_uploaded_file=False
+2026-05-17 21:58:26,155 | INFO | review_analyzer | Running analysis from URL/manual reviews: rows=7
+2026-05-17 21:58:26,159 | INFO | review_analyzer | Filters: {'sentiments': ['negative', 'neutral', 'positive'], 'categories': ['otzovik.com'], 'confidence_range': (0.0, 1.0), 'keyword': ''}
+2026-05-17 21:58:26,160 | INFO | review_analyzer | Filtered reviews: 7 of 7

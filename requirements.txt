@@ -1,0 +1,15 @@
+beautifulsoup4
+matplotlib
+numpy
+openpyxl
+pandas
+playwright
+plotly
+requests
+ru-core-news-sm
+scikit-learn
+spacy
+streamlit
+torch
+transformers
+wordcloud
