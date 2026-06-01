@@ -9,7 +9,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.cluster import KMeans
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-from analysis_helpers.aspects import extract_aspects_simple, extract_aspects_spacy
+from analysis_helpers.aspects import extract_aspects_simple
 from analysis_helpers.config import RANDOM_STATE
 from analysis_helpers.evaluation import evaluate
 from analysis_helpers.sentiment import sentiment_with_transformer, sentiment_without_spacy
@@ -272,9 +272,5 @@ def _can_train_classic_model(labels: Iterable[str] | None) -> bool:
 
 
 def _extract_aspects(texts: list[str], use_spacy_aspects: bool) -> list[list[str]]:
-    if use_spacy_aspects:
-        try:
-            return extract_aspects_spacy(texts)
-        except OSError:
-            return extract_aspects_simple(texts)
+    # Параметр use_spacy_aspects сохранён для совместимости, но spaCy-режим удалён.
     return extract_aspects_simple(texts)

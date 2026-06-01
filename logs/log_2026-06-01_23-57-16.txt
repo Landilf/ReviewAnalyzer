@@ -1,0 +1,2 @@
+2026-06-01 23:57:16,145 | INFO | review_analyzer | Logging initialized: /home/landilf/Studying/CodingPractice/Studying/ReviewAnalyzer/logs/log_2026-06-01_23-57-16.txt
+2026-06-01 23:57:16,145 | INFO | review_analyzer | test log entry

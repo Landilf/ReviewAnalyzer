@@ -43,7 +43,6 @@ def render_analysis_settings() -> dict:
         st.info("Используется модель: RuBERT Transformer (Sentiment-Balanced)")
 
         with st.expander("Дополнительные настройки"):
-            use_spacy_aspects = st.checkbox("Извлекать аспекты через spaCy", value=False)
             show_dev_tools = st.checkbox("Показать инструменты разработчика", value=False)
 
         with st.expander("Формат файла"):
@@ -51,7 +50,7 @@ def render_analysis_settings() -> dict:
 
     return {
         "method": method,
-        "use_spacy_aspects": use_spacy_aspects,
+        "use_spacy_aspects": False,
         "show_dev_tools": show_dev_tools,
         "uploaded_bytes": uploaded_file.getvalue() if uploaded_file else None,
         "uploaded_name": uploaded_file.name if uploaded_file else None,
