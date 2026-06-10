@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import io
+import json
+
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from app_control import is_cancel_requested, set_operation_running
 from app_logger import get_logger
 from analysis_helpers.insights import build_html_report
 from review_parser import build_reviews_from_text, fetch_reviews_from_url
@@ -13,10 +17,75 @@ from ui.dashboard.components import (
     sentiment_palette,
 )
 from ui.dashboard.research import render_aspects, render_clusters, render_periods, render_topics
-from ui.dashboard.services import run_analysis, run_analysis_from_frame
 
 
 logger = get_logger("ui.pages")
+
+
+def process_pending_url_import() -> None:
+    pending = st.session_state.get("pending_url_import")
+    if not pending:
+        return
+
+    url = pending["url"]
+    use_browser = pending["use_browser"]
+    headless = pending["headless"]
+    progress_placeholder = st.empty()
+    progress_bar = progress_placeholder.progress(0, text="Запуск загрузки отзывов")
+
+    def on_progress(value: float, message: str) -> None:
+        percent = int(max(0, min(value, 1)) * 100)
+        progress_bar.progress(percent, text=message)
+
+    logger.info("URL import requested: url=%s use_browser=%s headless=%s", url, use_browser, headless)
+    try:
+        scrape_result = fetch_reviews_from_url(
+            url,
+            use_browser=use_browser,
+            progress_callback=on_progress,
+            headless=headless,
+            cancel_check=is_cancel_requested,
+        )
+    except RuntimeError as exc:
+        set_operation_running(False)
+        progress_placeholder.empty()
+        st.session_state.pop("pending_url_import", None)
+        st.session_state.pop("cancel_requested", None)
+        st.warning(str(exc))
+        st.stop()
+    except Exception as exc:
+        set_operation_running(False)
+        logger.exception("URL import failed: %s", exc)
+        progress_placeholder.empty()
+        st.session_state.pop("pending_url_import", None)
+        st.error(f"Не удалось загрузить отзывы: {exc}")
+        st.info(
+            "Если сайт не отдаёт отзывы в HTML, попробуйте экспортировать отзывы в CSV "
+            "или использовать другой товар. Некоторые сайты могут загружать отзывы динамически."
+        )
+        st.stop()
+
+    st.session_state["url_reviews"] = scrape_result.reviews
+    st.session_state["url_reviews_source"] = scrape_result.source
+    st.session_state["active_input_type"] = "url"
+    st.session_state["url_reviews_meta"] = {
+        "source": scrape_result.source,
+        "label": "url-import",
+        "created_at": pd.Timestamp.now().strftime("%Y-%m-%d_%H-%M-%S"),
+        "rows": int(len(scrape_result.reviews)),
+        "columns": list(scrape_result.reviews.columns),
+    }
+    logger.info("URL import succeeded: rows=%s source=%s", len(scrape_result.reviews), scrape_result.source)
+    progress_bar.progress(100, text=f"Готово: загружено {len(scrape_result.reviews)} отзывов")
+    set_operation_running(False)
+    st.session_state.pop("pending_url_import", None)
+
+    if scrape_result.warning:
+        st.warning(scrape_result.warning)
+
+    st.success(scrape_result.message)
+    st.session_state.pop("cancel_requested", None)
+    st.rerun()
 
 def render_brief_overview(filtered: pd.DataFrame, insights: list[str], recommendations: list[str]) -> None:
     st.subheader("Краткий обзор")
@@ -63,6 +132,9 @@ def render_brief_overview(filtered: pd.DataFrame, insights: list[str], recommend
         )
         st.plotly_chart(fig, use_container_width=True)
 
+        st.markdown("#### Динамика отзывов")
+        _render_timeline(filtered)
+
     with right:
         st.markdown("#### Главные тезисы")
         for insight in insights[:5]:
@@ -73,131 +145,168 @@ def render_brief_overview(filtered: pd.DataFrame, insights: list[str], recommend
 
 
 def render_loader() -> None:
-    st.subheader("Загрузка отзывов по ссылке")
-    st.markdown(
-        "Вставьте ссылку на страницу товара. Приложение попробует найти отзывы на странице, "
-        "сохранит их как текущий набор данных и сразу отправит в общий анализ."
-    )
-    with st.container(border=True):
-        url = st.text_input(
-            "Ссылка на товар",
-            placeholder="https://otzovik.com/reviews/... или https://otzovik.com/review_123.html",
-        )
-        limit = st.slider("Максимум отзывов", 10, 300, 100, 10)
-        use_browser = st.checkbox(
-            "Использовать браузерную загрузку при блокировке",
-            value=True,
-            help="Playwright запускает Chromium и лучше работает с сайтами, где HTML формируется JavaScript.",
-        )
-        headless = st.checkbox(
-            "Скрытый режим (Headless)",
-            value=False,
-            help="Если выключить, откроется окно браузера. Это помогает пройти капчу или увидеть причину блокировки.",
-        )
-        parse_clicked = st.button("Загрузить и проанализировать", type="primary")
+    st.subheader("Входные данные")
+    tabs = st.tabs(["Ссылка", "Файл", "Текст"])
 
-    if parse_clicked:
-        progress_placeholder = st.empty()
-        progress_bar = progress_placeholder.progress(0, text="Запуск загрузки отзывов")
-
-        def on_progress(value: float, message: str) -> None:
-            percent = int(max(0, min(value, 1)) * 100)
-            progress_bar.progress(percent, text=message)
-
-        logger.info("URL import requested: url=%s limit=%s use_browser=%s headless=%s", url, limit, use_browser, headless)
-        try:
-            scrape_result = fetch_reviews_from_url(
-                url,
-                limit=limit,
-                use_browser=use_browser,
-                progress_callback=on_progress,
-                headless=headless,
+    with tabs[0]:
+        st.markdown(
+            "Вставьте ссылку на страницу товара. Приложение попробует найти отзывы на странице, "
+            "сохранит их как текущий набор данных и сразу отправит в общий анализ."
+        )
+        with st.container(border=True):
+            url = st.text_input(
+                "Ссылка на товар",
+                placeholder="https://otzovik.com/reviews/... или https://otzovik.com/review_123.html",
+                key="review_url_input",
             )
-        except Exception as exc:
-            logger.exception("URL import failed: %s", exc)
-            progress_placeholder.empty()
-            st.error(f"Не удалось загрузить отзывы: {exc}")
-            st.info(
-                "Если сайт не отдаёт отзывы в HTML, попробуйте экспортировать отзывы в CSV "
-                "или использовать другой товар. DNS/Ozon могут загружать отзывы динамически."
+            use_browser = st.checkbox(
+                "Использовать браузерную загрузку при блокировке",
+                value=True,
+                help="Playwright запускает Chromium и лучше работает с сайтами, где HTML формируется JavaScript.",
             )
-            return
+            headless = st.checkbox(
+                "Скрытый режим (Headless)",
+                value=False,
+                help="Если выключить, откроется окно браузера. Это помогает пройти капчу или увидеть причину блокировки.",
+            )
+            parse_clicked = st.button("Загрузить и проанализировать", type="primary", key="url_import_button")
 
-        st.session_state["url_reviews"] = scrape_result.reviews
-        st.session_state["url_reviews_source"] = scrape_result.source
-        logger.info("URL import succeeded: rows=%s source=%s", len(scrape_result.reviews), scrape_result.source)
-        progress_bar.progress(100, text=f"Готово: загружено {len(scrape_result.reviews)} отзывов")
-        
-        if scrape_result.warning:
-            st.warning(scrape_result.warning)
-            
-        st.success(scrape_result.message)
-        st.rerun()
-
-    st.divider()
-    st.subheader("Запасной вариант: вставка отзывов текстом")
-    st.markdown("Если сайт блокирует автоматическую загрузку, скопируйте отзывы вручную и вставьте их ниже.")
-    manual_text = st.text_area(
-        "Отзывы",
-        placeholder="Один отзыв — один абзац. Между отзывами оставляйте пустую строку.",
-        height=180,
-    )
-    if st.button("Использовать вставленные отзывы"):
-        logger.info("Manual import requested: text_length=%s", len(manual_text))
-        manual_reviews = build_reviews_from_text(manual_text)
-        if manual_reviews.empty:
-            logger.warning("Manual import produced empty dataset")
-            st.error("Не удалось выделить отзывы из текста. Разделяйте отзывы пустыми строками.")
-        else:
-            st.session_state["url_reviews"] = manual_reviews
-            st.session_state["url_reviews_source"] = "ручная вставка"
-            logger.info("Manual import succeeded: rows=%s", len(manual_reviews))
-            st.success(f"Загружено {len(manual_reviews)} отзывов из вставленного текста.")
+        if parse_clicked:
+            st.session_state["pending_url_import"] = {
+                "url": url,
+                "use_browser": use_browser,
+                "headless": headless,
+            }
+            st.session_state.pop("cancel_requested", None)
+            set_operation_running(True)
             st.rerun()
 
-    if "url_reviews" in st.session_state:
-        st.success(f"Сейчас используются отзывы из ссылки: {st.session_state.get('url_reviews_source', 'неизвестный источник')}")
-        st.dataframe(st.session_state["url_reviews"].head(20), use_container_width=True, hide_index=True)
+        if "url_reviews" in st.session_state:
+            st.success(f"Сейчас используются отзывы из ссылки: {st.session_state.get('url_reviews_source', 'неизвестный источник')}")
+            st.dataframe(st.session_state["url_reviews"].head(20), use_container_width=True, hide_index=True)
+            _render_review_downloads(
+                st.session_state["url_reviews"],
+                st.session_state.get("url_reviews_source", "unknown"),
+                st.session_state.get("url_reviews_meta", {}),
+            )
+
+    with tabs[1]:
+        st.markdown("Загрузите CSV или Excel-файл с отзывами — анализ начнётся сразу после выбора файла.")
+        uploaded_file = st.file_uploader("Файл с отзывами", type=["csv", "xlsx", "xls"], key="input_file_uploader")
+        if uploaded_file is not None:
+            st.caption(f"Выбран файл: `{uploaded_file.name}`")
+            try:
+                preview_df = st.session_state.get("file_reviews")
+                current_source = st.session_state.get("file_reviews_source")
+                if preview_df is None or current_source != uploaded_file.name:
+                    preview_df = _read_uploaded_reviews(uploaded_file)
+                    st.session_state["file_reviews"] = preview_df
+                    st.session_state["file_reviews_source"] = uploaded_file.name
+                    st.session_state["file_reviews_meta"] = {
+                        "source": "file-upload",
+                        "label": "file-import",
+                        "created_at": pd.Timestamp.now().strftime("%Y-%m-%d_%H-%M-%S"),
+                        "rows": int(len(preview_df)),
+                        "columns": list(preview_df.columns),
+                    }
+                    st.session_state["active_input_type"] = "file"
+                    st.session_state.pop("cancel_requested", None)
+                    st.success(f"Загружено {len(preview_df)} отзывов из файла.")
+            except Exception as exc:
+                st.error(f"Не удалось прочитать файл: {exc}")
+                preview_df = None
+
+            if preview_df is not None:
+                st.dataframe(preview_df.head(20), use_container_width=True, hide_index=True)
+                _render_review_downloads(
+                    preview_df,
+                    uploaded_file.name,
+                    st.session_state.get("file_reviews_meta", {}),
+                )
+        else:
+            st.info("Сначала выберите файл — он будет использован автоматически.")
+
+        if "file_reviews" in st.session_state and st.session_state.get("file_reviews_source"):
+            st.success(f"Сейчас используются отзывы из файла: {st.session_state.get('file_reviews_source', 'неизвестный файл')}")
+
+    with tabs[2]:
+        st.markdown("Если сайт блокирует автоматическую загрузку, скопируйте отзывы вручную и вставьте их ниже.")
+        manual_text = st.text_area(
+            "Отзывы",
+            placeholder="Один отзыв — один абзац. Между отзывами оставляйте пустую строку.",
+            height=180,
+            key="manual_reviews_input",
+        )
+        if st.button("Использовать вставленные отзывы", key="manual_import_button"):
+            logger.info("Manual import requested: text_length=%s", len(manual_text))
+            manual_reviews = build_reviews_from_text(manual_text)
+            if manual_reviews.empty:
+                logger.warning("Manual import produced empty dataset")
+                st.error("Не удалось выделить отзывы из текста. Разделяйте отзывы пустыми строками.")
+            else:
+                st.session_state["file_reviews"] = manual_reviews
+                st.session_state["file_reviews_source"] = "ручная вставка"
+                st.session_state["active_input_type"] = "manual"
+                st.session_state["file_reviews_meta"] = {
+                    "source": "manual-input",
+                    "label": "manual-import",
+                    "created_at": pd.Timestamp.now().strftime("%Y-%m-%d_%H-%M-%S"),
+                    "rows": int(len(manual_reviews)),
+                    "columns": list(manual_reviews.columns),
+                }
+                st.session_state.pop("cancel_requested", None)
+                logger.info("Manual import succeeded: rows=%s", len(manual_reviews))
+                st.success(f"Загружено {len(manual_reviews)} отзывов из вставленного текста.")
+                st.rerun()
+
+        if "file_reviews" in st.session_state and st.session_state.get("file_reviews_source") == "ручная вставка":
+            st.success("Сейчас используются отзывы из ручной вставки.")
+            st.dataframe(st.session_state["file_reviews"].head(20), use_container_width=True, hide_index=True)
+            _render_review_downloads(
+                st.session_state["file_reviews"],
+                st.session_state.get("file_reviews_source", "unknown"),
+                st.session_state.get("file_reviews_meta", {}),
+            )
 
 
-def render_home(filtered: pd.DataFrame, insights: list[str], recommendations: list[str]) -> None:
-    st.subheader("Краткая картина")
-    left, right = st.columns([1, 1])
+def _render_review_downloads(reviews: pd.DataFrame, source_name: str, metadata: dict) -> None:
+    st.markdown("#### Скачать распарсенные отзывы")
+    left, right = st.columns(2)
+    csv_file_name = f"parsed_reviews_{source_name.replace(' ', '_').replace('/', '_')}.csv"
+    json_file_name = f"parsed_reviews_{source_name.replace(' ', '_').replace('/', '_')}.json"
+
+    csv_bytes = reviews.to_csv(index=False).encode("utf-8-sig")
+    json_payload = json.dumps(
+        {
+            **metadata,
+            "source": source_name,
+            "reviews": reviews.to_dict(orient="records"),
+        },
+        ensure_ascii=False,
+        indent=2,
+    ).encode("utf-8")
 
     with left:
-        sentiment_counts = filtered["predicted_sentiment"].value_counts().rename_axis("sentiment").reset_index(name="count")
-        fig = px.bar(
-            sentiment_counts,
-            x="sentiment",
-            y="count",
-            color="sentiment",
-            color_discrete_map=sentiment_palette(),
-            labels={"sentiment": "Тональность", "count": "Количество"},
-            title="Распределение тональности",
+        st.download_button(
+            "Скачать CSV",
+            data=csv_bytes,
+            file_name=csv_file_name,
+            mime="text/csv",
         )
-        st.plotly_chart(fig, use_container_width=True)
-
     with right:
-        st.markdown("#### Автоматические выводы")
-        for insight in insights:
-            st.success(insight)
-        st.markdown("#### Рекомендации")
-        for recommendation in recommendations:
-            st.warning(recommendation)
+        st.download_button(
+            "Скачать JSON",
+            data=json_payload,
+            file_name=json_file_name,
+            mime="application/json",
+        )
 
-    with st.expander("Динамика и оценки", expanded=False):
-        _render_timeline(filtered)
-        if "rating" in filtered.columns:
-            fig = px.box(
-                filtered,
-                x="predicted_sentiment",
-                y="rating",
-                color="predicted_sentiment",
-                color_discrete_map=sentiment_palette(),
-                title="Оценки по тональности",
-                labels={"rating": "Оценка", "predicted_sentiment": "Тональность"},
-            )
-            st.plotly_chart(fig, use_container_width=True)
+
+def _read_uploaded_reviews(uploaded_file) -> pd.DataFrame:
+    buffer = io.BytesIO(uploaded_file.getvalue())
+    if uploaded_file.name.lower().endswith((".xlsx", ".xls")):
+        return pd.read_excel(buffer)
+    return pd.read_csv(buffer)
 
 
 def render_research(filtered: pd.DataFrame, result, aspect_stats: pd.DataFrame) -> None:
@@ -274,7 +383,17 @@ def render_quality(result, options: dict) -> None:
         st.plotly_chart(fig, use_container_width=True)
 
 
-def render_report(filtered: pd.DataFrame, aspect_stats: pd.DataFrame, result, insights: list[str], recommendations: list[str]) -> None:
+def render_report(
+    filtered: pd.DataFrame,
+    aspect_stats: pd.DataFrame,
+    result,
+    insights: list[str],
+    recommendations: list[str],
+    *,
+    source_name: str,
+    filters: dict,
+    options: dict,
+) -> None:
     st.subheader("Отчёт и предметный словарь")
     domain_terms = st.text_area(
         "Важные аспекты предметной области",
@@ -284,11 +403,24 @@ def render_report(filtered: pd.DataFrame, aspect_stats: pd.DataFrame, result, in
     selected_terms = [term.strip().lower() for term in domain_terms.splitlines() if term.strip()]
     st.dataframe(build_domain_frame(filtered, selected_terms), use_container_width=True, hide_index=True)
 
-    html_report = build_html_report(filtered, aspect_stats, result.topics, insights, recommendations)
+    html_report = build_html_report(
+        filtered,
+        aspect_stats,
+        result.topics,
+        insights,
+        recommendations,
+        model_name=result.model_name,
+        model_metrics=result.metrics,
+        confusion=result.confusion,
+        source_name=source_name,
+        filters=filters,
+        options=options,
+    )
+    model_slug = result.model_name.lower().replace(" ", "_").replace("/", "_")
     st.download_button(
         "Скачать HTML-отчёт",
         data=html_report.encode("utf-8"),
-        file_name="review_analysis_report.html",
+        file_name=f"review_analysis_report_{model_slug}.html",
         mime="text/html",
     )
 
@@ -301,16 +433,14 @@ def _render_timeline(filtered: pd.DataFrame) -> None:
     timeline = (
         filtered.dropna(subset=["date"])
         .assign(date=lambda frame: frame["date"].dt.date)
-        .groupby(["date", "predicted_sentiment"], as_index=False)
+        .groupby("date", as_index=False)
         .size()
     )
-    fig = px.area(
+    fig = px.bar(
         timeline,
         x="date",
         y="size",
-        color="predicted_sentiment",
-        color_discrete_map=sentiment_palette(),
-        labels={"date": "Дата", "size": "Количество", "predicted_sentiment": "Тональность"},
-        title="Динамика отзывов во времени",
+        labels={"date": "Дата", "size": "Количество"},
+        title="Динамика количества отзывов во времени",
     )
     st.plotly_chart(fig, use_container_width=True)

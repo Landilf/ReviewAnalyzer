@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from typing import Callable
 from typing import Iterable
 
 import pandas as pd
@@ -14,6 +15,9 @@ from analysis_helpers.config import RANDOM_STATE
 from analysis_helpers.evaluation import evaluate
 from analysis_helpers.sentiment import sentiment_with_transformer, sentiment_without_spacy
 from analysis_helpers.topics import describe_topics, topic_modeling
+
+
+CancelCheck = Callable[[], bool] | None
 
 
 SENTIMENT_ORDER = ["negative", "neutral", "positive"]
@@ -82,7 +86,12 @@ def ensure_review_columns(data: pd.DataFrame) -> pd.DataFrame:
     return prepared
 
 
-def analyze_reviews(data: pd.DataFrame, method: str = "classic", use_spacy_aspects: bool = False) -> AnalysisResult:
+def analyze_reviews(
+    data: pd.DataFrame,
+    method: str = "transformer",
+    cancel_check: CancelCheck = None,
+) -> AnalysisResult:
+    _check_cancel(cancel_check)
     reviews = ensure_review_columns(data)
     texts = reviews["text"].tolist()
     labels = reviews["label"].tolist() if "label" in reviews.columns else None
@@ -91,13 +100,25 @@ def analyze_reviews(data: pd.DataFrame, method: str = "classic", use_spacy_aspec
         method = "transformer"
 
     if method == "transformer":
-        predictions, confidences = _predict_with_transformer(texts)
-        model_name = "RuBERT tiny sentiment"
+        classifier = sentiment_with_transformer()
+        predictions = []
+        confidences = []
+        for start in range(0, len(texts), 16):
+            _check_cancel(cancel_check)
+            batch = texts[start:start + 16]
+            raw_predictions = classifier(batch, truncation=True, max_length=512)
+            predictions.extend(normalize_sentiment(p["label"]) for p in raw_predictions)
+            confidences.extend(round(float(p["score"]), 4) for p in raw_predictions)
+        model_name = "RuBERT tiny"
     else:
-        predictions, confidences, metrics = _predict_with_classic_model(texts, labels)
+        _check_cancel(cancel_check)
+        predictions, confidences, metrics = _predict_with_classic_model(texts, labels, cancel_check)
         model_name = "TF-IDF + Logistic Regression"
 
-    reviews["predicted_sentiment"] = [normalize_sentiment(label) for label in predictions]
+    _check_cancel(cancel_check)
+    reviews["aspects"] = _extract_aspects(texts)
+
+    reviews["predicted_sentiment"] = predictions
     reviews["confidence"] = confidences
 
     if labels is not None and method == "transformer":
@@ -105,14 +126,13 @@ def analyze_reviews(data: pd.DataFrame, method: str = "classic", use_spacy_aspec
     elif labels is None:
         metrics = {}
 
-    aspects = _extract_aspects(texts, use_spacy_aspects)
-    reviews["aspects"] = aspects
     reviews["aspects_text"] = reviews["aspects"].apply(lambda values: ", ".join(values))
 
+    _check_cancel(cancel_check)
     aspect_stats = build_aspect_stats(reviews)
-    topics, topic_terms, topic_labels = build_topic_frames(reviews)
+    topics, topic_terms, topic_labels = build_topic_frames(reviews, cancel_check=cancel_check)
     reviews["topic"] = topic_labels
-    reviews["cluster"] = build_clusters(reviews)
+    reviews["cluster"] = build_clusters(reviews, cancel_check=cancel_check)
 
     confusion = build_confusion_matrix(reviews)
     model_comparison = build_model_comparison(reviews, metrics, model_name)
@@ -159,12 +179,18 @@ def build_aspect_stats(reviews: pd.DataFrame, limit: int = 40) -> pd.DataFrame:
     )
 
 
-def build_topic_frames(reviews: pd.DataFrame, n_topics: int = 5) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+def build_topic_frames(
+    reviews: pd.DataFrame,
+    n_topics: int = 5,
+    cancel_check: CancelCheck = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+    _check_cancel(cancel_check)
     topic_input = reviews["aspects"].apply(lambda values: " ".join(values) if values else "").tolist()
     if sum(bool(text.strip()) for text in topic_input) < 3:
         topic_input = reviews["text"].tolist()
 
     try:
+        _check_cancel(cancel_check)
         lda, vectorizer, doc_topics = topic_modeling(topic_input, n_topics=n_topics)
     except ValueError:
         return (
@@ -210,30 +236,33 @@ def build_model_comparison(reviews: pd.DataFrame, metrics: dict[str, float], mod
     )
 
 
-def build_clusters(reviews: pd.DataFrame, max_clusters: int = 5) -> list[str]:
+def build_clusters(
+    reviews: pd.DataFrame,
+    max_clusters: int = 5,
+    cancel_check: CancelCheck = None,
+) -> list[str]:
+    _check_cancel(cancel_check)
     if len(reviews) < 3:
         return ["Кластер 1"] * len(reviews)
 
     n_clusters = min(max_clusters, len(reviews))
     vectorizer = TfidfVectorizer(max_features=1000, ngram_range=(1, 2))
     try:
+        _check_cancel(cancel_check)
         matrix = vectorizer.fit_transform(reviews["text"])
+        _check_cancel(cancel_check)
         model = KMeans(n_clusters=n_clusters, random_state=RANDOM_STATE, n_init=10)
         labels = model.fit_predict(matrix)
     except ValueError:
         return ["Кластер не определён"] * len(reviews)
     return [f"Кластер {label + 1}" for label in labels]
 
-
-def _predict_with_transformer(texts: list[str]) -> tuple[list[str], list[float]]:
-    classifier = sentiment_with_transformer()
-    raw_predictions = classifier(texts, truncation=True)
-    labels = [prediction["label"] for prediction in raw_predictions]
-    confidences = [round(float(prediction["score"]), 4) for prediction in raw_predictions]
-    return labels, confidences
-
-
-def _predict_with_classic_model(texts: list[str], labels: Iterable[str] | None) -> tuple[list[str], list[float], dict[str, float]]:
+def _predict_with_classic_model(
+    texts: list[str],
+    labels: Iterable[str] | None,
+    cancel_check: CancelCheck = None,
+) -> tuple[list[str], list[float], dict[str, float]]:
+    _check_cancel(cancel_check)
     vectorizer, model = sentiment_without_spacy()
     if labels is None:
         raise ValueError("Классический режим требует столбец label для обучения модели.")
@@ -248,6 +277,7 @@ def _predict_with_classic_model(texts: list[str], labels: Iterable[str] | None) 
         stratify=stratify,
     )
     x_train_vec = vectorizer.fit_transform(x_train)
+    _check_cancel(cancel_check)
     model.fit(x_train_vec, y_train)
 
     x_test_vec = vectorizer.transform(x_test)
@@ -270,7 +300,10 @@ def _can_train_classic_model(labels: Iterable[str] | None) -> bool:
     counts = Counter(labels)
     return len(counts) >= 2 and min(counts.values()) >= 2
 
-
-def _extract_aspects(texts: list[str], use_spacy_aspects: bool) -> list[list[str]]:
-    # Параметр use_spacy_aspects сохранён для совместимости, но spaCy-режим удалён.
+def _extract_aspects(texts: list[str]) -> list[list[str]]:
     return extract_aspects_simple(texts)
+
+
+def _check_cancel(cancel_check: CancelCheck) -> None:
+    if cancel_check and cancel_check():
+        raise RuntimeError("Операция отменена пользователем.")

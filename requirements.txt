@@ -1,6 +1,4 @@
 beautifulsoup4
-matplotlib
-numpy
 openpyxl
 pandas
 playwright
@@ -10,4 +8,3 @@ scikit-learn
 streamlit
 torch
 transformers
-wordcloud

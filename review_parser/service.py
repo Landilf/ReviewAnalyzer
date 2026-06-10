@@ -5,7 +5,6 @@ from urllib.parse import urlparse
 
 from app_logger import get_logger
 from review_parser.browser_loader import download_page_with_browser
-from review_parser.dns_crawler import crawl_dns_reviews
 from review_parser.extractors import extract_links, extract_reviews
 from review_parser.http_loader import download_page
 from review_parser.models import ScrapeResult
@@ -17,16 +16,19 @@ logger = get_logger("parser.service")
 
 
 ProgressCallback = Callable[[float, str], None]
+CancelCheck = Callable[[], bool] | None
 
 
 def fetch_reviews_from_url(
     url: str,
-    limit: int = 100,
+    limit: int | None = None,
     use_browser: bool = True,
     progress_callback: ProgressCallback | None = None,
     headless: bool = True,
+    cancel_check: CancelCheck = None,
 ) -> ScrapeResult:
     progress = progress_callback or _noop_progress
+    _check_cancel(cancel_check)
     normalized_url = _normalize_url(url)
     source = urlparse(normalized_url).netloc.replace("www.", "")
 
@@ -34,54 +36,61 @@ def fetch_reviews_from_url(
     if source.endswith("otzovik.com") and use_browser:
         logger.info("Using dedicated Otzovik crawler")
         progress(0.02, "Запуск защищенного парсера Otzovik")
-        try:
-            dedicated = crawl_otzovik_reviews(normalized_url, limit=limit, progress_callback=progress, headless=headless)
-            if not dedicated.empty:
-                warning = None
-                if len(dedicated) < limit * 0.8:  # If we got significantly less than requested
-                    warning = "Сайт ограничил доступ во время загрузки. Анализ выполнен на основе частично собранных данных."
-                
-                return ScrapeResult(
-                    reviews=dedicated,
-                    source=source,
-                    message=f"Загружено {len(dedicated)} отзывов с сайта {source}.",
-                    warning=warning
-                )
-        except Exception as exc:
-            logger.warning("Dedicated Otzovik crawler failed: %s", exc)
+        dedicated = crawl_otzovik_reviews(
+            normalized_url,
+            limit=limit,
+            progress_callback=progress,
+            headless=headless,
+            cancel_check=cancel_check,
+        )
+        if not dedicated.empty:
+            warning = None
+            if limit is not None and len(dedicated) < limit * 0.8:
+                warning = "Сайт ограничил доступ во время загрузки. Анализ выполнен на основе частично собранных данных."
+            return ScrapeResult(
+                reviews=dedicated,
+                source=source,
+                message=f"Загружено {len(dedicated)} отзывов с сайта {source}.",
+                warning=warning,
+            )
+        raise ValueError("Не удалось найти отзывы на странице Otzovik.")
 
-    # Priority 2: Specialized DNS Crawler
-    if source.endswith("dns-shop.ru") and use_browser:
-        logger.info("Using dedicated DNS crawler")
-        progress(0.02, "Запуск защищенного парсера DNS")
-        try:
-            dedicated_dns = crawl_dns_reviews(normalized_url, progress_callback=progress)
-            if not dedicated_dns.empty:
-                return ScrapeResult(
-                    reviews=dedicated_dns,
-                    source=source,
-                    message=f"Загружено {len(dedicated_dns)} отзывов с сайта {source}.",
-                )
-        except Exception as exc:
-            logger.warning("Dedicated DNS crawler failed: %s", exc)
-
-    # Priority 3: General Crawler (Fallback)
+    # Priority 2: General Crawler (Fallback)
     candidates = build_candidate_urls(normalized_url)
     progress(0.02, "Подготовка ссылок для загрузки")
     logger.info("Start fetching reviews (fallback): source=%s limit=%s", source, limit)
     
     last_error = None
     for candidate_index, candidate_url in enumerate(candidates, start=1):
+        _check_cancel(cancel_check)
         candidate_base_progress = 0.05 + (candidate_index - 1) * (0.8 / max(len(candidates), 1))
         try:
             progress(candidate_base_progress, f"Загрузка кандидата {candidate_index}/{len(candidates)}")
             html = _load_html(candidate_url, use_browser)
-            reviews = _extract_reviews_for_source(html, source, candidate_url, limit, use_browser, progress, candidate_base_progress)
+            reviews = _extract_reviews_for_source(
+                html,
+                source,
+                candidate_url,
+                limit,
+                use_browser,
+                progress,
+                candidate_base_progress,
+                cancel_check,
+            )
             
             if reviews.empty and use_browser:
                 progress(candidate_base_progress + 0.12, "Повторная попытка (браузер)")
                 html = download_page_with_browser(candidate_url)
-                reviews = _extract_reviews_for_source(html, source, candidate_url, limit, use_browser, progress, candidate_base_progress + 0.12)
+                reviews = _extract_reviews_for_source(
+                    html,
+                    source,
+                    candidate_url,
+                    limit,
+                    use_browser,
+                    progress,
+                    candidate_base_progress + 0.12,
+                    cancel_check,
+                )
                 
             if not reviews.empty:
                 progress(1.0, f"Готово: загружено {len(reviews)} отзывов")
@@ -121,14 +130,18 @@ def _extract_reviews_for_source(
     html: str,
     source: str,
     base_url: str,
-    limit: int,
+    limit: int | None,
     use_browser: bool,
     progress: ProgressCallback,
     progress_base: float,
+    cancel_check: CancelCheck = None,
 ):
+    _check_cancel(cancel_check)
     progress(min(progress_base + 0.06, 0.98), "Анализ структуры страницы")
     if source.endswith("otzovik.com") and "/reviews/" in urlparse(base_url).path:
-        linked_reviews = _fetch_linked_otzovik_reviews(html, source, base_url, limit, use_browser, progress, progress_base)
+        linked_reviews = _fetch_linked_otzovik_reviews(
+            html, source, base_url, limit, use_browser, progress, progress_base, cancel_check
+        )
         if not linked_reviews.empty:
             return linked_reviews
     progress(min(progress_base + 0.1, 0.98), "Извлечение отзывов из текущей страницы")
@@ -139,11 +152,13 @@ def _fetch_linked_otzovik_reviews(
     html: str,
     source: str,
     base_url: str,
-    limit: int,
+    limit: int | None,
     use_browser: bool,
     progress: ProgressCallback,
     progress_base: float,
+    cancel_check: CancelCheck = None,
 ):
+    _check_cancel(cancel_check)
     links = extract_links(html, base_url, r"/review_\d+\.html")
     logger.info("Otzovik linked review URLs found: %s", len(links))
     if not links:
@@ -151,9 +166,10 @@ def _fetch_linked_otzovik_reviews(
         return _empty_frame()
 
     frames = []
-    target_links = links[:limit]
+    target_links = links if limit is None else links[:limit]
     total = len(target_links)
     for idx, link in enumerate(target_links, start=1):
+        _check_cancel(cancel_check)
         try:
             step_progress = progress_base + 0.12 + (idx / max(total, 1)) * 0.55
             progress(min(step_progress, 0.98), f"Загрузка отзыва {idx}/{total}")
@@ -169,7 +185,8 @@ def _fetch_linked_otzovik_reviews(
 
     import pandas as pd
 
-    return pd.concat(frames, ignore_index=True).drop_duplicates(subset=["text"]).head(limit)
+    frame = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["text"])
+    return frame if limit is None else frame.head(limit)
 
 
 def _empty_frame():
@@ -180,3 +197,8 @@ def _empty_frame():
 
 def _noop_progress(_: float, __: str) -> None:
     return
+
+
+def _check_cancel(cancel_check: CancelCheck) -> None:
+    if cancel_check and cancel_check():
+        raise RuntimeError("Операция отменена пользователем.")

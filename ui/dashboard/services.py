@@ -1,26 +1,45 @@
 import io
 
 import pandas as pd
-import streamlit as st
 
 from analysis_helpers.pipeline import analyze_reviews
-from utils.data_loader import load_data
 
 
-@st.cache_data(show_spinner="Выполняю анализ отзывов...")
-def run_analysis(csv_bytes: bytes | None, filename: str | None, method: str, use_spacy_aspects: bool):
+def run_analysis(
+    csv_bytes: bytes | None,
+    filename: str | None,
+    method: str,
+    cancel_check=None,
+):
     data = _read_dataset(csv_bytes, filename)
-    return analyze_reviews(data, method=method, use_spacy_aspects=use_spacy_aspects)
+    return analyze_reviews(data, method=method, cancel_check=cancel_check)
 
 
-@st.cache_data(show_spinner="Выполняю анализ отзывов...")
-def run_analysis_from_frame(data: pd.DataFrame, method: str, use_spacy_aspects: bool):
-    return analyze_reviews(data, method=method, use_spacy_aspects=use_spacy_aspects)
+def run_analysis_from_frame(data: pd.DataFrame, method: str, cancel_check=None):
+    return analyze_reviews(data, method=method, cancel_check=cancel_check)
+
+
+def analyze_dataset(
+    csv_bytes: bytes | None,
+    filename: str | None,
+    method: str,
+    cancel_check=None,
+):
+    data = _read_dataset(csv_bytes, filename)
+    return analyze_reviews(data, method=method, cancel_check=cancel_check)
+
+
+def analyze_frame(
+    data: pd.DataFrame,
+    method: str,
+    cancel_check=None,
+):
+    return analyze_reviews(data, method=method, cancel_check=cancel_check)
 
 
 def _read_dataset(csv_bytes: bytes | None, filename: str | None) -> pd.DataFrame:
     if csv_bytes is None:
-        return load_data("reviews.csv")
+        raise ValueError("Загрузите CSV/XLSX-файл или импортируйте отзывы по ссылке.")
 
     buffer = io.BytesIO(csv_bytes)
     if filename and filename.lower().endswith((".xlsx", ".xls")):

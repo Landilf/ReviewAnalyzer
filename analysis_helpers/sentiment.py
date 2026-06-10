@@ -3,10 +3,13 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 
 
+TINY_SENTIMENT_MODEL = "cointegrated/rubert-tiny-sentiment-balanced"
+
+
 def sentiment_with_transformer():
     return pipeline(
         "sentiment-analysis",
-        model="cointegrated/rubert-tiny-sentiment-balanced"
+        model=TINY_SENTIMENT_MODEL
     )
 
 

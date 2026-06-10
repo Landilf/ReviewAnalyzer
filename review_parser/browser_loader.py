@@ -54,7 +54,6 @@ async def _download_page_with_browser(url: str) -> str:
             status = response.status if response else None
             logger.info("Browser loaded: url=%s status=%s title=%s body_length=%s", url, status, title, len(content))
             
-            # DNS-specific and general bot-block detection
             if status in {401, 403} or "captcha" in title.lower() or "вы робот" in title.lower():
                 raise ValueError(
                     f"Сайт вернул HTTP {status or 'Block'}: браузерная загрузка заблокирована (Anti-Bot). "

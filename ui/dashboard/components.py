@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from analysis_helpers.pipeline import SENTIMENT_LABELS_RU
+from app_control import request_cancel
 
 
 def sentiment_palette() -> dict[str, str]:
@@ -15,64 +15,88 @@ def sentiment_palette() -> dict[str, str]:
 
 
 def render_header() -> None:
-    st.title("📊 Анализ пользовательских отзывов")
-    st.caption("Пошаговый дашборд для ВКР: от загрузки данных до отчёта и интерпретации результатов.")
+    st.title("📊 Анализ отзывов")
+
+
+def render_source_status(source_name: str, has_reviews: bool, can_cancel: bool = False) -> None:
+    st.markdown("### Источник данных")
     with st.container(border=True):
-        st.markdown(
-            "**Сценарий работы:** 1) загрузите отзывы → 2) посмотрите выводы → "
-            "3) исследуйте аспекты/темы → 4) проверьте качество → 5) скачайте отчёт."
-        )
-
-
-def render_source_status(source_name: str, has_url_reviews: bool) -> None:
-    with st.sidebar:
-        st.info(f"Текущий источник: {source_name}")
-        if has_url_reviews and st.button("Сбросить отзывы из ссылки"):
-            st.session_state.pop("url_reviews", None)
-            st.session_state.pop("url_reviews_source", None)
-            st.rerun()
+        left, right = st.columns([3, 1])
+        with left:
+            st.info(f"Текущий источник: {source_name}")
+        with right:
+            if can_cancel and st.button("Отменить операцию", use_container_width=True):
+                request_cancel()
+                st.rerun()
+            if has_reviews and st.button("Сбросить текущие данные", use_container_width=True):
+                st.session_state.pop("url_reviews", None)
+                st.session_state.pop("url_reviews_source", None)
+                st.session_state.pop("file_reviews", None)
+                st.session_state.pop("file_reviews_source", None)
+                st.session_state.pop("active_input_type", None)
+                st.session_state.pop("sentiment_filter_mode", None)
+                st.rerun()
 
 
 def render_analysis_settings() -> dict:
-    with st.sidebar:
-        st.header("1. Данные и модель")
-        uploaded_file = st.file_uploader("Файл с отзывами", type=["csv", "xlsx", "xls"])
-        
-        # We focus only on RuBERT Transformer as requested
-        method = "transformer"
-        st.info("Используется модель: RuBERT Transformer (Sentiment-Balanced)")
-
-        with st.expander("Дополнительные настройки"):
-            show_dev_tools = st.checkbox("Показать инструменты разработчика", value=False)
-
-        with st.expander("Формат файла"):
-            st.markdown("Минимум: `text`. Дополнительно: `label`, `date`, `category`, `rating`.")
+    st.markdown("### 1. Данные и модель")
+    with st.container(border=True):
+        col_left, col_right = st.columns([1.2, 1])
+        with col_left:
+            method = "transformer"
+            st.markdown("**Модель анализа**")
+            st.caption("Используется `RuBERT tiny` как основная модель тонального анализа.")
+        with col_right:
+            st.markdown("**Формат файла**")
+            st.caption("Минимум: `text`. Дополнительно: `label`, `date`, `category`, `rating`.")
 
     return {
         "method": method,
-        "use_spacy_aspects": False,
-        "show_dev_tools": show_dev_tools,
-        "uploaded_bytes": uploaded_file.getvalue() if uploaded_file else None,
-        "uploaded_name": uploaded_file.name if uploaded_file else None,
     }
 
 
 def render_filters(reviews: pd.DataFrame) -> dict:
-    with st.sidebar:
-        st.header("2. Фильтры")
-        sentiments = st.multiselect(
-            "Тональность",
-            options=["negative", "neutral", "positive"],
-            default=["negative", "neutral", "positive"],
-            format_func=lambda value: SENTIMENT_LABELS_RU.get(value, value),
-        )
-        categories = st.multiselect(
-            "Категории",
-            options=sorted(reviews["category"].dropna().unique().tolist()),
-            default=sorted(reviews["category"].dropna().unique().tolist()),
-        )
-        confidence_range = st.slider("Уверенность модели", 0.0, 1.0, (0.0, 1.0), 0.05)
+    st.markdown("### 2. Фильтры")
+    with st.container(border=True):
+        sentiment_modes = {
+            "all": ["negative", "neutral", "positive"],
+            "negative": ["negative"],
+            "neutral": ["neutral"],
+            "positive": ["positive"],
+        }
+        current_mode = st.session_state.get("sentiment_filter_mode", "all")
+        st.caption("Быстрый просмотр по тональности")
+        buttons = st.columns(4)
+        for index, (mode, title) in enumerate(
+            [
+                ("all", "Все"),
+                ("negative", "Негативные"),
+                ("neutral", "Нейтральные"),
+                ("positive", "Позитивные"),
+            ]
+        ):
+            with buttons[index]:
+                if st.button(
+                    title,
+                    use_container_width=True,
+                    type="primary" if current_mode == mode else "secondary",
+                    key=f"sentiment_mode_{mode}",
+                ):
+                    st.session_state["sentiment_filter_mode"] = mode
+                    st.rerun()
+
+        top_left, top_right = st.columns([1.2, 1])
+        with top_left:
+            categories = st.multiselect(
+                "Категории",
+                options=sorted(reviews["category"].dropna().unique().tolist()),
+                default=sorted(reviews["category"].dropna().unique().tolist()),
+            )
+        with top_right:
+            confidence_range = st.slider("Уверенность модели", 0.0, 1.0, (0.0, 1.0), 0.05)
+
         keyword = st.text_input("Поиск по тексту или аспектам").strip().lower()
+        sentiments = sentiment_modes.get(current_mode, sentiment_modes["all"])
     return {
         "sentiments": sentiments,
         "categories": categories,

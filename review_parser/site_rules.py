@@ -9,11 +9,6 @@ def build_candidate_urls(url: str) -> list[str]:
     clean_url = _without_query(parsed)
     candidates = [url, clean_url]
 
-    if host.endswith("dns-shop.ru"):
-        normalized = clean_url.rstrip("/")
-        if not normalized.endswith("/opinion"):
-            candidates.append(f"{normalized}/opinion/")
-
     if host.endswith("ozon.ru"):
         normalized = clean_url.rstrip("/")
         if not normalized.endswith("/reviews"):
