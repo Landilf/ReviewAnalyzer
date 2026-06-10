@@ -4,13 +4,30 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from ui.dashboard.components import localize_columns
+
+
+def _review_has_aspect(values, selected_aspect: str) -> bool:
+    if isinstance(values, (list, tuple, set)):
+        return selected_aspect in values
+    if pd.isna(values):
+        return False
+    if isinstance(values, str):
+        return selected_aspect in [part.strip() for part in values.split(",") if part.strip()]
+    return False
+
 
 def render_aspects(filtered: pd.DataFrame, aspect_stats: pd.DataFrame) -> None:
+    problem_aspects = aspect_stats[aspect_stats["mentions"] >= 2].sort_values(
+        ["negative_share", "mentions"],
+        ascending=[False, False],
+    )
+    display_aspects = problem_aspects.head(20) if not problem_aspects.empty else aspect_stats.head(20)
+
     left, right = st.columns([1.2, 1])
     with left:
-        top_aspects = aspect_stats.head(20)
         fig = px.bar(
-            top_aspects.sort_values("mentions"),
+            display_aspects.sort_values("mentions"),
             x="mentions",
             y="aspect",
             orientation="h",
@@ -22,47 +39,57 @@ def render_aspects(filtered: pd.DataFrame, aspect_stats: pd.DataFrame) -> None:
         st.plotly_chart(fig, use_container_width=True)
 
     with right:
-        problem_aspects = aspect_stats[aspect_stats["mentions"] >= 2].sort_values(
-            ["negative_share", "mentions"],
-            ascending=[False, False],
-        )
         st.markdown("#### Проблемные зоны")
         st.dataframe(
-            problem_aspects[["aspect", "mentions", "negative", "neutral", "positive", "negative_share"]].head(15),
+            localize_columns(problem_aspects[["aspect", "mentions", "negative", "neutral", "positive", "negative_share"]].head(15)),
             use_container_width=True,
             hide_index=True,
         )
 
     selected_aspect = st.selectbox("Детализация аспекта", options=aspect_stats["aspect"].tolist() or [""])
     if selected_aspect:
-        aspect_reviews = filtered[filtered["aspects"].apply(lambda values: selected_aspect in values)]
+        aspect_row = aspect_stats[aspect_stats["aspect"] == selected_aspect].iloc[0]
+        aspect_reviews = filtered[filtered["aspects"].apply(lambda values: _review_has_aspect(values, selected_aspect))]
         card_left, card_right, card_third = st.columns(3)
-        card_left.metric("Упоминаний", len(aspect_reviews))
-        card_right.metric("Негативных", int(aspect_reviews["predicted_sentiment"].eq("negative").sum()))
+        card_left.metric("Упоминаний", int(aspect_row["mentions"]))
+        card_right.metric("Негативных", int(aspect_row["negative"]))
         card_third.metric("Уверенность", f"{aspect_reviews['confidence'].mean():.1%}" if len(aspect_reviews) else "—")
         st.dataframe(
-            aspect_reviews[["review_id", "text", "predicted_sentiment", "confidence", "aspects_text"]].head(20),
+            localize_columns(aspect_reviews[["review_id", "text", "predicted_sentiment", "confidence", "aspects_text"]].head(20)),
             use_container_width=True,
             hide_index=True,
         )
 
 
 def render_topics(filtered: pd.DataFrame, result) -> None:
+    filtered_topics = (
+        filtered["topic"]
+        .value_counts()
+        .rename_axis("topic")
+        .reset_index(name="review_count")
+    )
+    if not filtered_topics.empty:
+        filtered_topics["share"] = (filtered_topics["review_count"] / filtered_topics["review_count"].sum()).round(3)
+    visible_topics = set(filtered_topics["topic"].tolist())
+    visible_topic_terms = result.topic_terms[result.topic_terms["topic"].isin(visible_topics)] if not result.topic_terms.empty else result.topic_terms
+
     left, right = st.columns([0.9, 1.1])
     with left:
         st.markdown("#### Размер тем")
-        st.dataframe(result.topics, use_container_width=True, hide_index=True)
-        if not result.topics.empty:
-            fig = px.pie(result.topics, names="topic", values="review_count", title="Распределение тем")
+        st.dataframe(localize_columns(filtered_topics), use_container_width=True, hide_index=True)
+        if not filtered_topics.empty:
+            fig = px.pie(filtered_topics, names="topic", values="review_count", title="Распределение тем")
             st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("После применения фильтров не осталось отзывов для тематического анализа.")
 
     with right:
         st.markdown("#### Ключевые слова")
-        if result.topic_terms.empty:
-            st.info("Недостаточно данных для тематического моделирования.")
+        if visible_topic_terms.empty:
+            st.info("После применения фильтров не осталось тем с доступными ключевыми словами.")
         else:
             fig = px.bar(
-                result.topic_terms,
+                visible_topic_terms,
                 x="weight",
                 y="term",
                 color="topic",
@@ -78,7 +105,7 @@ def render_topics(filtered: pd.DataFrame, result) -> None:
     if selected_topic:
         topic_reviews = filtered[filtered["topic"] == selected_topic]
         st.dataframe(
-            topic_reviews[["review_id", "text", "predicted_sentiment", "confidence", "topic"]].head(30),
+            localize_columns(topic_reviews[["review_id", "text", "predicted_sentiment", "confidence", "topic"]].head(30)),
             use_container_width=True,
             hide_index=True,
         )
@@ -95,7 +122,7 @@ def render_clusters(filtered: pd.DataFrame) -> None:
     selected_cluster = st.selectbox("Отзывы выбранного кластера", options=cluster_counts["cluster"].tolist())
     cluster_reviews = filtered[filtered["cluster"] == selected_cluster]
     st.dataframe(
-        cluster_reviews[["review_id", "text", "predicted_sentiment", "confidence", "cluster", "aspects_text"]].head(30),
+        localize_columns(cluster_reviews[["review_id", "text", "predicted_sentiment", "confidence", "cluster", "aspects_text"]].head(30)),
         use_container_width=True,
         hide_index=True,
     )
@@ -119,7 +146,7 @@ def render_periods(filtered: pd.DataFrame) -> None:
         return
 
     period_frame = _compare_periods(filtered, first_range, second_range)
-    st.dataframe(period_frame, use_container_width=True, hide_index=True)
+    st.dataframe(localize_columns(period_frame), use_container_width=True, hide_index=True)
     fig = px.bar(
         period_frame,
         x="period",

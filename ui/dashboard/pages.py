@@ -14,6 +14,7 @@ from review_parser import build_reviews_from_text, fetch_reviews_from_url
 from ui.dashboard.components import (
     build_domain_frame,
     download_csv_button,
+    localize_columns,
     sentiment_palette,
 )
 from ui.dashboard.research import render_aspects, render_clusters, render_periods, render_topics
@@ -89,14 +90,18 @@ def process_pending_url_import() -> None:
 
 def render_brief_overview(filtered: pd.DataFrame, insights: list[str], recommendations: list[str]) -> None:
     st.subheader("Краткий обзор")
+    if filtered.empty:
+        st.info("После применения текущих фильтров не осталось отзывов для построения краткого обзора.")
+        return
+
     left, right = st.columns([1.1, 0.9])
 
     with left:
-        sentiment_share = filtered["predicted_sentiment"].value_counts(normalize=True) if len(filtered) else pd.Series(dtype=float)
+        sentiment_share = filtered["predicted_sentiment"].value_counts(normalize=True)
         positive_share = float(sentiment_share.get("positive", 0.0))
         negative_share = float(sentiment_share.get("negative", 0.0))
         neutral_share = float(sentiment_share.get("neutral", 0.0))
-        confidence = float(filtered["confidence"].mean()) if len(filtered) else 0.0
+        confidence = float(filtered["confidence"].mean())
 
         score = max(0, min(100, int(round(50 + (positive_share - negative_share) * 50 + (confidence - 0.5) * 20))))
         st.metric("Интегральная оценка товара", f"{score}/100")
@@ -183,7 +188,7 @@ def render_loader() -> None:
 
         if "url_reviews" in st.session_state:
             st.success(f"Сейчас используются отзывы из ссылки: {st.session_state.get('url_reviews_source', 'неизвестный источник')}")
-            st.dataframe(st.session_state["url_reviews"].head(20), use_container_width=True, hide_index=True)
+            st.dataframe(localize_columns(st.session_state["url_reviews"].head(20)), use_container_width=True, hide_index=True)
             _render_review_downloads(
                 st.session_state["url_reviews"],
                 st.session_state.get("url_reviews_source", "unknown"),
@@ -217,7 +222,7 @@ def render_loader() -> None:
                 preview_df = None
 
             if preview_df is not None:
-                st.dataframe(preview_df.head(20), use_container_width=True, hide_index=True)
+                st.dataframe(localize_columns(preview_df.head(20)), use_container_width=True, hide_index=True)
                 _render_review_downloads(
                     preview_df,
                     uploaded_file.name,
@@ -261,7 +266,7 @@ def render_loader() -> None:
 
         if "file_reviews" in st.session_state and st.session_state.get("file_reviews_source") == "ручная вставка":
             st.success("Сейчас используются отзывы из ручной вставки.")
-            st.dataframe(st.session_state["file_reviews"].head(20), use_container_width=True, hide_index=True)
+            st.dataframe(localize_columns(st.session_state["file_reviews"].head(20)), use_container_width=True, hide_index=True)
             _render_review_downloads(
                 st.session_state["file_reviews"],
                 st.session_state.get("file_reviews_source", "unknown"),
@@ -343,7 +348,7 @@ def render_reviews(filtered: pd.DataFrame, all_reviews: pd.DataFrame) -> None:
         "aspects_text",
     ]
     existing_columns = [column for column in visible_columns if column in filtered.columns]
-    st.dataframe(filtered[existing_columns], use_container_width=True, hide_index=True)
+    st.dataframe(localize_columns(filtered[existing_columns]), use_container_width=True, hide_index=True)
 
     left, right = st.columns(2)
     with left:
@@ -368,7 +373,7 @@ def render_quality(result, options: dict) -> None:
         )
         fig.update_yaxes(range=[0, 1])
         st.plotly_chart(fig, use_container_width=True)
-        st.dataframe(metrics_frame, use_container_width=True, hide_index=True)
+        st.dataframe(localize_columns(metrics_frame), use_container_width=True, hide_index=True)
     else:
         st.info("Метрики качества доступны, если в данных есть столбец `label`.")
 
@@ -395,18 +400,27 @@ def render_report(
     options: dict,
 ) -> None:
     st.subheader("Отчёт и предметный словарь")
+    filtered_topics = (
+        filtered["topic"]
+        .value_counts()
+        .rename_axis("topic")
+        .reset_index(name="review_count")
+    )
+    if not filtered_topics.empty:
+        filtered_topics["share"] = (filtered_topics["review_count"] / filtered_topics["review_count"].sum()).round(3)
+
     domain_terms = st.text_area(
         "Важные аспекты предметной области",
         value="доставка\nкачество\nцена\nсервис\nупаковка\nбатарея\nэкран",
         help="Один аспект на строку. Таблица покажет, насколько часто они встречаются и насколько проблемны.",
     )
     selected_terms = [term.strip().lower() for term in domain_terms.splitlines() if term.strip()]
-    st.dataframe(build_domain_frame(filtered, selected_terms), use_container_width=True, hide_index=True)
+    st.dataframe(localize_columns(build_domain_frame(filtered, selected_terms)), use_container_width=True, hide_index=True)
 
     html_report = build_html_report(
         filtered,
         aspect_stats,
-        result.topics,
+        filtered_topics,
         insights,
         recommendations,
         model_name=result.model_name,

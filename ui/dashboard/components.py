@@ -6,6 +6,37 @@ import streamlit as st
 from app_control import request_cancel
 
 
+DISPLAY_COLUMN_NAMES = {
+    "review_id": "ID отзыва",
+    "text": "Текст отзыва",
+    "label": "Истинная метка",
+    "predicted_sentiment": "Предсказанная тональность",
+    "confidence": "Уверенность",
+    "category": "Категория",
+    "rating": "Оценка",
+    "topic": "Тема",
+    "cluster": "Кластер",
+    "aspects_text": "Аспекты",
+    "aspect": "Аспект",
+    "mentions": "Упоминаний",
+    "negative": "Негативных",
+    "neutral": "Нейтральных",
+    "positive": "Позитивных",
+    "negative_share": "Доля негатива",
+    "term": "Термин",
+    "weight": "Вес",
+    "review_count": "Количество отзывов",
+    "share": "Доля",
+    "count": "Количество",
+    "period": "Период",
+    "reviews": "Отзывов",
+    "positive_share": "Доля позитива",
+    "avg_confidence": "Средняя уверенность",
+    "metric": "Метрика",
+    "value": "Значение",
+}
+
+
 def sentiment_palette() -> dict[str, str]:
     return {
         "negative": "#ef4444",
@@ -153,3 +184,7 @@ def build_domain_frame(filtered: pd.DataFrame, terms: list[str]) -> pd.DataFrame
             }
         )
     return pd.DataFrame(rows)
+
+
+def localize_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    return frame.rename(columns={column: DISPLAY_COLUMN_NAMES.get(column, column) for column in frame.columns})
