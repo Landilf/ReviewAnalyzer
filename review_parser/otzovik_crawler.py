@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import random
 import re
 import time
@@ -12,25 +11,29 @@ from urllib.parse import urlparse, urlunparse
 import pandas as pd
 
 from app_logger import get_logger
+from review_parser.browser_runtime import log_static_resource_failures, resolve_chromium_executable
 from review_parser.extractors import clean_text, looks_like_review, prepare_reviews
 from review_parser.site_rules import build_candidate_urls
-from review_parser.utils import UserAgentManager, Timer
 
 
 logger = get_logger("parser.otzovik")
 ProgressCallback = Callable[[float, str], None]
 CancelCheck = Callable[[], bool] | None
-ua_manager = UserAgentManager()
-timer = Timer()
-
-
+CheckpointCallback = Callable[[pd.DataFrame], None]
 @dataclass
 class CrawlConfig:
     timeout_ms: int = 45000
     max_retries: int = 4
-    base_retry_delay: float = 10.0
-    max_listing_pages: int = 50
     headless: bool = True
+
+
+class PartialCrawlError(RuntimeError):
+    """Ошибка сбора, при которой часть отзывов уже доступна для сохранения."""
+
+    def __init__(self, reviews: pd.DataFrame, reason: Exception):
+        self.reviews = reviews
+        self.reason = str(reason)
+        super().__init__(f"Сбор прерван: {self.reason}")
 
 
 def crawl_otzovik_reviews(
@@ -39,9 +42,10 @@ def crawl_otzovik_reviews(
     progress_callback: ProgressCallback | None = None,
     headless: bool = True,
     cancel_check: CancelCheck = None,
+    checkpoint_callback: CheckpointCallback | None = None,
 ) -> pd.DataFrame:
     callback = progress_callback or _noop_progress
-    return _run_async(_crawl_otzovik_reviews(seed_url, limit, callback, headless, cancel_check))
+    return _run_async(_crawl_otzovik_reviews(seed_url, limit, callback, headless, cancel_check, checkpoint_callback))
 
 
 async def _crawl_otzovik_reviews(
@@ -50,6 +54,7 @@ async def _crawl_otzovik_reviews(
     progress: ProgressCallback,
     headless: bool = True,
     cancel_check: CancelCheck = None,
+    checkpoint_callback: CheckpointCallback | None = None,
 ) -> pd.DataFrame:
     try:
         from playwright.async_api import async_playwright
@@ -60,7 +65,7 @@ async def _crawl_otzovik_reviews(
     config.headless = headless
     progress(0.02, "Запуск браузерного краулера Otzovik")
     _check_cancel(cancel_check)
-    logger.info("Otzovik crawler config: limit=%s headless=%s max_listing_pages=%s", limit, headless, config.max_listing_pages)
+    logger.info("Otzovik crawler config: limit=%s headless=%s", limit, headless)
 
     seed_candidates = [url for url in build_candidate_urls(seed_url) if "otzovik.com" in urlparse(url).netloc]
     if not seed_candidates:
@@ -69,69 +74,40 @@ async def _crawl_otzovik_reviews(
     logger.info("Otzovik crawler listing URL: %s", listing_url)
 
     async with async_playwright() as playwright:
-        executable_path = os.getenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE")
+        executable_path = resolve_chromium_executable()
         browser = None
         context = None
         main_page = None
+        rows: list[dict] = []
         try:
             browser = await playwright.chromium.launch(
                 headless=config.headless,
                 executable_path=executable_path,
                 args=[
-                    "--disable-blink-features=AutomationControlled",
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
                     "--window-position=0,0",
                 ],
             )
-            # Randomized viewport
-            width = random.randint(1280, 1920)
-            height = random.randint(720, 1080)
+            logger.info("Browser launched: executable_path=%s version=%s", executable_path or "playwright-managed", browser.version)
 
             context = await browser.new_context(
-                user_agent=ua_manager.get_random_ua(),
-                viewport={"width": width, "height": height},
+                viewport={"width": 1440, "height": 900},
                 locale="ru-RU",
                 timezone_id="Europe/Moscow",
                 java_script_enabled=True,
             )
-
-            # Initial human-like pause before doing anything
-            await asyncio.sleep(random.uniform(1.0, 3.0))
-
-            # Advanced Stealth Script
-            await context.add_init_script(
-                """
-                // 1. Hide webdriver
-                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-
-                // 2. Mock plugins
-                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-
-                // 3. Mock languages
-                Object.defineProperty(navigator, 'languages', { get: () => ['ru-RU', 'ru'] });
-
-                // 4. Mock chrome object
-                window.chrome = { runtime: {} };
-
-                // 5. Mock permissions
-                const originalQuery = window.navigator.permissions.query;
-                window.navigator.permissions.query = (parameters) => (
-                  parameters.name === 'notifications' ?
-                    Promise.resolve({ state: Notification.permission }) :
-                    originalQuery(parameters)
-                );
-                """
-            )
             main_page = await context.new_page()
+            log_static_resource_failures(main_page, logger)
 
-            await _safe_goto(main_page, listing_url, config, "listing_page", progress)
+            await _safe_goto(main_page, listing_url, config, "listing_page", progress, cancel_check)
             await _soft_scroll(main_page)
 
             # Step 1: Extract reviews available directly on the listing page
             listing_html = await main_page.content()
             rows = _extract_reviews_from_listing(listing_html, listing_url)
             logger.info("Extracted %s reviews directly from listing page", len(rows))
+            _publish_checkpoint(rows, limit, checkpoint_callback)
             _check_cancel(cancel_check)
 
             if limit is None or len(rows) < limit:
@@ -155,9 +131,11 @@ async def _crawl_otzovik_reviews(
                         elapsed = max(time.monotonic() - parsing_started_at, 0.001)
                         remaining_reviews = max(len(review_links) - idx, 0)
                         eta_seconds = (elapsed / idx) * remaining_reviews if idx else 0
-                        eta_text = _format_eta(eta_seconds)
+                        elapsed_text = _format_duration(elapsed)
+                        eta_text = _format_duration(eta_seconds)
                         progress_text = f"Парсинг отзывов: {idx} из {len(review_links)}"
-                        if eta_text:
+                        progress_text += f" · Прошло {elapsed_text}"
+                        if remaining_reviews and eta_text:
                             progress_text += f" · Осталось {eta_text}"
                         progress(
                             min(item_progress, 0.97),
@@ -170,6 +148,7 @@ async def _crawl_otzovik_reviews(
                         else:
                             failed_detail_reviews += 1
                         if idx == len(review_links) or idx % 10 == 0:
+                            _publish_checkpoint(rows, limit, checkpoint_callback)
                             logger.info(
                                 "Detail parsing progress: processed=%s/%s success=%s failed=%s accumulated_rows=%s",
                                 idx,
@@ -205,6 +184,14 @@ async def _crawl_otzovik_reviews(
                 progress(1.0, f"Готово: загружено {len(frame)} отзывов")
 
             return frame
+        except Exception as exc:
+            if rows:
+                partial = prepare_reviews(rows, "otzovik.com", limit, min_len=1)
+                if not partial.empty:
+                    logger.warning("Otzovik crawl interrupted; preserving %s collected reviews: %s", len(partial), exc)
+                    progress(1.0, f"Сбор прерван · Сохранено отзывов: {len(partial)}")
+                    raise PartialCrawlError(partial, exc) from exc
+            raise
         finally:
             if main_page is not None:
                 await main_page.close()
@@ -235,7 +222,7 @@ async def _collect_review_links(
         _check_cancel(cancel_check)
         current_url = _otzovik_page_url(listing_url, page_idx) if is_review_catalog else listing_url
         if page_idx > 1:
-            await _safe_goto(page, current_url, config, f"listing_page_{page_idx}", progress)
+            await _safe_goto(page, current_url, config, f"listing_page_{page_idx}", progress, cancel_check)
             await _soft_scroll(page)
         if page_idx == 1:
             scan_progress = 0.05
@@ -259,16 +246,16 @@ async def _collect_review_links(
         if not page_links and page_idx == 1 and not config.headless:
             logger.info("No links found on first page, waiting for user intervention...")
             progress(min(page_idx / max(max_pages_to_visit, 1), 0.97), "Отзывы не найдены. Если видите капчу — решите её в окне браузера.")
-            if await _wait_for_captcha_solve(page, progress, timeout_m=2):
+            if await _wait_for_captcha_solve(page, progress, cancel_check):
                 html = await page.content()
                 page_links = _extract_review_links(html, current_url)
 
         logger.info("Listing page %s links: %s", page_idx, len(page_links))
         discovered_pages = _extract_listing_page_count(html, listing_url)
         if is_review_catalog and discovered_pages:
-            max_pages_to_visit = max(max_pages_to_visit, min(discovered_pages, config.max_listing_pages))
+            max_pages_to_visit = max(max_pages_to_visit, discovered_pages)
             logger.info(
-                "Listing page %s pagination discovered total_pages=%s effective_limit=%s",
+                "Listing page %s pagination discovered total_pages=%s pages_to_visit=%s",
                 page_idx,
                 discovered_pages,
                 max_pages_to_visit,
@@ -310,7 +297,7 @@ async def _collect_review_links(
 async def _parse_review_detail_reused(page, link: str, config: CrawlConfig, cancel_check: CancelCheck = None) -> dict | None:
     try:
         _check_cancel(cancel_check)
-        await _safe_goto(page, link, config, "review_detail")
+        await _safe_goto(page, link, config, "review_detail", cancel_check=cancel_check)
         await _soft_scroll(page)
         html = await page.content()
         title = await page.title()
@@ -329,6 +316,8 @@ async def _parse_review_detail_reused(page, link: str, config: CrawlConfig, canc
         else:
             logger.warning("Detail parsed empty: url=%s", link)
         return row
+    except RuntimeError:
+        raise
     except Exception as exc:
         logger.warning("Failed to parse detail page %s: %s", link, exc)
         return None
@@ -446,25 +435,16 @@ async def _safe_goto(
     config: CrawlConfig,
     action_name: str,
     progress: ProgressCallback | None = None,
+    cancel_check: CancelCheck = None,
 ) -> None:
-    current_retry_delay = config.base_retry_delay
     last_error = None
     
     for attempt in range(1, config.max_retries + 1):
         try:
+            _check_cancel(cancel_check)
             logger.info("Goto %s attempt %s/%s: %s", action_name, attempt, config.max_retries, url)
             
-            # Masking with extra headers
-            await page.set_extra_http_headers({
-                "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "none",
-                "Sec-Fetch-User": "?1",
-                "Upgrade-Insecure-Requests": "1",
-            })
-            
-            response = await page.goto(url, wait_until="domcontentloaded", timeout=config.timeout_ms, referer="https://www.google.com/")
+            response = await page.goto(url, wait_until="domcontentloaded", timeout=config.timeout_ms)
             status = response.status if response else None
             
             if status in {401, 403, 429}:
@@ -479,56 +459,53 @@ async def _safe_goto(
                     if progress:
                         progress(0.05, "Обнаружена капча: решите её в окне браузера для продолжения")
                     logger.warning("Captcha detected in headful mode. Waiting for user...")
-                    if await _wait_for_captcha_solve(page, progress or _noop_progress):
-                         # Re-check status after solve
+                    if await _wait_for_captcha_solve(page, progress or _noop_progress, cancel_check):
                          return
                 
                 raise ValueError(f"Blocked page title={title}")
                 
-            # Success - small human pause after load
-            await timer.sleep(1.5, 3.0)
             return
             
         except Exception as exc:
             last_error = exc
             logger.warning("Goto failed %s attempt %s: %s", action_name, attempt, exc)
             if attempt < config.max_retries:
-                # If it's a block, we wait even longer
-                wait_multiplier = 1.5 if "Block" in str(exc) else 1.0
-                delay = current_retry_delay * wait_multiplier
-                logger.info("Waiting %.2f seconds (cooldown) before retry...", delay)
-                await timer.sleep(delay, delay + 5.0)
-                current_retry_delay *= 2  # Exponential backoff
+                logger.info("Retrying %s immediately", action_name)
                 
     raise ValueError(f"Не удалось загрузить страницу ({action_name}): {last_error}")
 
 
-async def _wait_for_captcha_solve(page, progress: ProgressCallback, timeout_m: int = 5) -> bool:
+async def _wait_for_captcha_solve(
+    page,
+    progress: ProgressCallback,
+    cancel_check: CancelCheck = None,
+) -> bool:
     """
-    Цикл ожидания решения капчи пользователем. 
-    Опрашивает страницу каждые 2 секунды.
+    Ждёт ручного решения капчи без фиксированного таймаута.
+    Проверяет отмену и состояние страницы каждые 2 секунды.
     """
-    import time
-    start_time = time.time()
-    while time.time() - start_time < timeout_m * 60:
+    started_at = time.monotonic()
+    while True:
+        _check_cancel(cancel_check)
+        elapsed = _format_duration(time.monotonic() - started_at)
+        progress(0.05, f"Ожидание решения капчи · Прошло {elapsed} · Нажмите «Отменить операцию», чтобы прервать")
         await asyncio.sleep(2.0)
+        _check_cancel(cancel_check)
         try:
             title = await page.title()
             html = await page.content()
             if not _is_blocked_page(title, html):
                 logger.info("Captcha solved by user!")
-                progress(0.05, "Капча решена, продолжаю работу...")
-                await timer.sleep(1.0, 2.0)
+                progress(0.05, f"Капча решена · Ожидание заняло {_format_duration(time.monotonic() - started_at)}")
                 return True
         except Exception:
-            break
-    return False
+            logger.exception("Could not check captcha page state")
+            raise
 
 
 async def _soft_scroll(page) -> None:
     for _ in range(3):
         await page.mouse.wheel(0, random.randint(700, 1300))
-        await timer.sleep(0.6, 1.2)
 
 
 def _extract_reviews_from_listing(html: str, base_url: str) -> list[dict]:
@@ -698,7 +675,20 @@ def _check_cancel(cancel_check: CancelCheck) -> None:
         raise RuntimeError("Операция отменена пользователем.")
 
 
-def _format_eta(seconds: float) -> str:
+def _publish_checkpoint(
+    rows: list[dict],
+    limit: int | None,
+    checkpoint_callback: CheckpointCallback | None,
+) -> None:
+    if checkpoint_callback is None or not rows:
+        return
+    try:
+        checkpoint_callback(prepare_reviews(rows, "otzovik.com", limit, min_len=1))
+    except Exception as exc:
+        logger.warning("Could not publish crawl checkpoint: %s", exc)
+
+
+def _format_duration(seconds: float) -> str:
     total_seconds = max(int(round(seconds)), 0)
     hours, remainder = divmod(total_seconds, 3600)
     minutes, secs = divmod(remainder, 60)
@@ -710,4 +700,4 @@ def _format_eta(seconds: float) -> str:
         parts.append(f"{minutes} мин")
     if secs:
         parts.append(f"{secs} сек")
-    return ", ".join(parts)
+    return ", ".join(parts) or "0 сек"

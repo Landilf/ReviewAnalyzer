@@ -1,16 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import random
 
 from app_logger import get_logger
-
-
-from review_parser.utils.ua_manager import UserAgentManager
+from review_parser.browser_runtime import log_static_resource_failures, resolve_chromium_executable
 
 logger = get_logger("parser.browser")
-ua_manager = UserAgentManager()
 
 
 async def _download_page_with_browser(url: str) -> str:
@@ -20,31 +16,24 @@ async def _download_page_with_browser(url: str) -> str:
         raise ValueError("Для браузерной загрузки установите зависимость `playwright`.") from exc
 
     async with async_playwright() as playwright:
-        executable_path = os.getenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE")
+        executable_path = resolve_chromium_executable()
         logger.info("Launching browser: executable_path=%s", executable_path or "playwright-managed")
         browser = await playwright.chromium.launch(
             headless=True,
             executable_path=executable_path,
             args=[
-                "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
             ],
         )
+        logger.info("Browser launched: version=%s", browser.version)
         context = await browser.new_context(
-            user_agent=ua_manager.get_random_ua(),
             viewport={"width": 1920, "height": 1080},
             locale="ru-RU",
             timezone_id="Europe/Moscow",
             java_script_enabled=True,
         )
-        await context.add_init_script(
-            """
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined
-            });
-            """
-        )
         page = await context.new_page()
+        log_static_resource_failures(page, logger)
         try:
             logger.info("Browser goto: %s", url)
             response = await page.goto(url, wait_until="domcontentloaded", timeout=45000)

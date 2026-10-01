@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import json
+from typing import Mapping
+from urllib.parse import urlparse
 
 import pandas as pd
 import plotly.express as px
@@ -38,6 +40,9 @@ def process_pending_url_import() -> None:
         percent = int(max(0, min(value, 1)) * 100)
         progress_bar.progress(percent, text=message)
 
+    def on_checkpoint(reviews: pd.DataFrame) -> None:
+        st.session_state["url_reviews_checkpoint"] = reviews
+
     logger.info("URL import requested: url=%s use_browser=%s headless=%s", url, use_browser, headless)
     try:
         scrape_result = fetch_reviews_from_url(
@@ -46,12 +51,15 @@ def process_pending_url_import() -> None:
             progress_callback=on_progress,
             headless=headless,
             cancel_check=is_cancel_requested,
+            checkpoint_callback=on_checkpoint,
         )
     except RuntimeError as exc:
         set_operation_running(False)
         progress_placeholder.empty()
         st.session_state.pop("pending_url_import", None)
         st.session_state.pop("cancel_requested", None)
+        if _restore_url_checkpoint(url, str(exc)):
+            st.rerun()
         st.warning(str(exc))
         st.stop()
     except Exception as exc:
@@ -59,6 +67,8 @@ def process_pending_url_import() -> None:
         logger.exception("URL import failed: %s", exc)
         progress_placeholder.empty()
         st.session_state.pop("pending_url_import", None)
+        if _restore_url_checkpoint(url, f"Ошибка загрузки: {exc}"):
+            st.rerun()
         st.error(f"Не удалось загрузить отзывы: {exc}")
         st.info(
             "Если сайт не отдаёт отзывы в HTML, попробуйте экспортировать отзывы в CSV "
@@ -80,13 +90,41 @@ def process_pending_url_import() -> None:
     progress_bar.progress(100, text=f"Готово: загружено {len(scrape_result.reviews)} отзывов")
     set_operation_running(False)
     st.session_state.pop("pending_url_import", None)
+    st.session_state.pop("url_reviews_checkpoint", None)
 
     if scrape_result.warning:
-        st.warning(scrape_result.warning)
+        st.session_state["url_reviews_notice"] = scrape_result.warning
+    else:
+        st.session_state.pop("url_reviews_notice", None)
 
     st.success(scrape_result.message)
     st.session_state.pop("cancel_requested", None)
     st.rerun()
+
+
+def _restore_url_checkpoint(url: str, reason: str) -> bool:
+    checkpoint = st.session_state.get("url_reviews_checkpoint")
+    if not isinstance(checkpoint, pd.DataFrame) or checkpoint.empty:
+        return False
+
+    source = urlparse(url).netloc.replace("www.", "") or "unknown"
+    st.session_state["url_reviews"] = checkpoint
+    st.session_state["url_reviews_source"] = source
+    st.session_state["active_input_type"] = "url"
+    st.session_state["url_reviews_meta"] = {
+        "source": source,
+        "label": "url-import-checkpoint",
+        "created_at": pd.Timestamp.now().strftime("%Y-%m-%d_%H-%M-%S"),
+        "rows": int(len(checkpoint)),
+        "columns": list(checkpoint.columns),
+    }
+    st.session_state["url_reviews_notice"] = (
+        f"{reason} Уже собранные {len(checkpoint)} отзывов сохранены и доступны для скачивания."
+    )
+    st.session_state.pop("url_reviews_checkpoint", None)
+    logger.warning("Restored URL import checkpoint: rows=%s source=%s reason=%s", len(checkpoint), source, reason)
+    return True
+
 
 def render_brief_overview(filtered: pd.DataFrame, insights: list[str], recommendations: list[str]) -> None:
     st.subheader("Краткий обзор")
@@ -154,6 +192,7 @@ def render_loader() -> None:
     tabs = st.tabs(["Ссылка", "Файл", "Текст"])
 
     with tabs[0]:
+        _render_current_review_downloads({"url"})
         st.markdown(
             "Вставьте ссылку на страницу товара. Приложение попробует найти отзывы на странице, "
             "сохранит их как текущий набор данных и сразу отправит в общий анализ."
@@ -183,19 +222,16 @@ def render_loader() -> None:
                 "headless": headless,
             }
             st.session_state.pop("cancel_requested", None)
+            st.session_state.pop("url_reviews_checkpoint", None)
             set_operation_running(True)
             st.rerun()
 
         if "url_reviews" in st.session_state:
             st.success(f"Сейчас используются отзывы из ссылки: {st.session_state.get('url_reviews_source', 'неизвестный источник')}")
             st.dataframe(localize_columns(st.session_state["url_reviews"].head(20)), use_container_width=True, hide_index=True)
-            _render_review_downloads(
-                st.session_state["url_reviews"],
-                st.session_state.get("url_reviews_source", "unknown"),
-                st.session_state.get("url_reviews_meta", {}),
-            )
 
     with tabs[1]:
+        _render_current_review_downloads({"file"})
         st.markdown("Загрузите CSV или Excel-файл с отзывами — анализ начнётся сразу после выбора файла.")
         uploaded_file = st.file_uploader("Файл с отзывами", type=["csv", "xlsx", "xls"], key="input_file_uploader")
         if uploaded_file is not None:
@@ -223,11 +259,6 @@ def render_loader() -> None:
 
             if preview_df is not None:
                 st.dataframe(localize_columns(preview_df.head(20)), use_container_width=True, hide_index=True)
-                _render_review_downloads(
-                    preview_df,
-                    uploaded_file.name,
-                    st.session_state.get("file_reviews_meta", {}),
-                )
         else:
             st.info("Сначала выберите файл — он будет использован автоматически.")
 
@@ -235,6 +266,7 @@ def render_loader() -> None:
             st.success(f"Сейчас используются отзывы из файла: {st.session_state.get('file_reviews_source', 'неизвестный файл')}")
 
     with tabs[2]:
+        _render_current_review_downloads({"manual"})
         st.markdown("Если сайт блокирует автоматическую загрузку, скопируйте отзывы вручную и вставьте их ниже.")
         manual_text = st.text_area(
             "Отзывы",
@@ -267,18 +299,57 @@ def render_loader() -> None:
         if "file_reviews" in st.session_state and st.session_state.get("file_reviews_source") == "ручная вставка":
             st.success("Сейчас используются отзывы из ручной вставки.")
             st.dataframe(localize_columns(st.session_state["file_reviews"].head(20)), use_container_width=True, hide_index=True)
-            _render_review_downloads(
-                st.session_state["file_reviews"],
-                st.session_state.get("file_reviews_source", "unknown"),
-                st.session_state.get("file_reviews_meta", {}),
-            )
 
 
-def _render_review_downloads(reviews: pd.DataFrame, source_name: str, metadata: dict) -> None:
-    st.markdown("#### Скачать распарсенные отзывы")
+def _render_current_review_downloads(input_types: set[str]) -> None:
+    """Keeps the current result downloadable before another import can replace it."""
+    if st.session_state.get("active_input_type") not in input_types:
+        return
+
+    reviews, source_name, metadata = _get_current_review_download(st.session_state)
+    if not isinstance(reviews, pd.DataFrame) or reviews.empty:
+        return
+
+    if "url" in input_types:
+        notice = st.session_state.get("url_reviews_notice")
+        if notice:
+            st.warning(notice)
+
+    with st.container(border=True):
+        st.markdown("#### Сохранённые распарсенные отзывы")
+        st.caption(
+            f"Источник: {source_name}. Скачайте результат до запуска нового импорта — "
+            "это особенно полезно после отмены или досрочной остановки загрузки."
+        )
+        _render_review_downloads(reviews, source_name, metadata, show_title=False)
+
+
+def _get_current_review_download(state: Mapping) -> tuple[pd.DataFrame | None, str, dict]:
+    active_input_type = state.get("active_input_type")
+    if active_input_type == "url":
+        reviews = state.get("url_reviews")
+        source_name = state.get("url_reviews_source", "unknown")
+        metadata = state.get("url_reviews_meta", {})
+    elif active_input_type in {"file", "manual"}:
+        reviews = state.get("file_reviews")
+        source_name = state.get("file_reviews_source", "unknown")
+        metadata = state.get("file_reviews_meta", {})
+    else:
+        return None, "unknown", {}
+    return reviews, str(source_name), metadata if isinstance(metadata, dict) else {}
+
+
+def _render_review_downloads(
+    reviews: pd.DataFrame,
+    source_name: str,
+    metadata: dict,
+    show_title: bool = True,
+) -> None:
+    if show_title:
+        st.markdown("#### Скачать распарсенные отзывы")
     left, right = st.columns(2)
-    csv_file_name = f"parsed_reviews_{source_name.replace(' ', '_').replace('/', '_')}.csv"
-    json_file_name = f"parsed_reviews_{source_name.replace(' ', '_').replace('/', '_')}.json"
+    csv_file_name = _build_download_filename(source_name, metadata, "csv")
+    json_file_name = _build_download_filename(source_name, metadata, "json")
 
     csv_bytes = reviews.to_csv(index=False).encode("utf-8-sig")
     json_payload = json.dumps(
@@ -305,6 +376,12 @@ def _render_review_downloads(reviews: pd.DataFrame, source_name: str, metadata: 
             file_name=json_file_name,
             mime="application/json",
         )
+
+
+def _build_download_filename(source_name: str, metadata: dict, extension: str) -> str:
+    created_at = str(metadata.get("created_at") or pd.Timestamp.now().strftime("%Y-%m-%d_%H-%M-%S"))
+    safe_source = source_name.replace(" ", "_").replace("/", "_").replace("\\", "_")
+    return f"parsed_reviews_{safe_source}_{created_at}.{extension}"
 
 
 def _read_uploaded_reviews(uploaded_file) -> pd.DataFrame:

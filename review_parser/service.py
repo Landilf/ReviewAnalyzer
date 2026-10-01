@@ -8,7 +8,7 @@ from review_parser.browser_loader import download_page_with_browser
 from review_parser.extractors import extract_links, extract_reviews
 from review_parser.http_loader import download_page
 from review_parser.models import ScrapeResult
-from review_parser.otzovik_crawler import crawl_otzovik_reviews
+from review_parser.otzovik_crawler import PartialCrawlError, crawl_otzovik_reviews
 from review_parser.site_rules import build_candidate_urls
 
 
@@ -17,6 +17,7 @@ logger = get_logger("parser.service")
 
 ProgressCallback = Callable[[float, str], None]
 CancelCheck = Callable[[], bool] | None
+CheckpointCallback = Callable[["pd.DataFrame"], None]
 
 
 def fetch_reviews_from_url(
@@ -26,6 +27,7 @@ def fetch_reviews_from_url(
     progress_callback: ProgressCallback | None = None,
     headless: bool = True,
     cancel_check: CancelCheck = None,
+    checkpoint_callback: CheckpointCallback | None = None,
 ) -> ScrapeResult:
     progress = progress_callback or _noop_progress
     _check_cancel(cancel_check)
@@ -36,13 +38,26 @@ def fetch_reviews_from_url(
     if source.endswith("otzovik.com") and use_browser:
         logger.info("Using dedicated Otzovik crawler")
         progress(0.02, "Запуск защищенного парсера Otzovik")
-        dedicated = crawl_otzovik_reviews(
-            normalized_url,
-            limit=limit,
-            progress_callback=progress,
-            headless=headless,
-            cancel_check=cancel_check,
-        )
+        try:
+            dedicated = crawl_otzovik_reviews(
+                normalized_url,
+                limit=limit,
+                progress_callback=progress,
+                headless=headless,
+                cancel_check=cancel_check,
+                checkpoint_callback=checkpoint_callback,
+            )
+        except PartialCrawlError as exc:
+            logger.warning("Returning partial Otzovik result with %s reviews: %s", len(exc.reviews), exc.reason)
+            return ScrapeResult(
+                reviews=exc.reviews,
+                source=source,
+                message=f"Сбор прерван, но сохранено {len(exc.reviews)} отзывов с сайта {source}.",
+                warning=(
+                    "Загрузка завершилась досрочно. Уже собранные отзывы доступны для анализа "
+                    f"и скачивания в CSV или JSON. Причина: {exc.reason}"
+                ),
+            )
         if not dedicated.empty:
             warning = None
             if limit is not None and len(dedicated) < limit * 0.8:
