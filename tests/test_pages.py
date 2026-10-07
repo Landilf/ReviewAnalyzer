@@ -33,15 +33,18 @@ class LoaderDownloadTests(unittest.TestCase):
         self.assertEqual(source, "otzovik.com")
         self.assertEqual(metadata["label"], "url-import")
 
-    def test_file_and_manual_results_use_file_storage(self) -> None:
+    def test_file_and_manual_results_use_separate_storage(self) -> None:
         reviews = pd.DataFrame({"text": ["Отзыв"]})
-        for input_type in ("file", "manual"):
-            with self.subTest(input_type=input_type):
-                selected, source, _ = _get_current_review_download(
-                    {"active_input_type": input_type, "file_reviews": reviews, "file_reviews_source": "reviews.csv"}
-                )
-                self.assertIs(selected, reviews)
-                self.assertEqual(source, "reviews.csv")
+        file_selected, file_source, _ = _get_current_review_download(
+            {"active_input_type": "file", "file_reviews": reviews, "file_reviews_source": "reviews.csv"}
+        )
+        manual_selected, manual_source, _ = _get_current_review_download(
+            {"active_input_type": "manual", "manual_reviews": reviews, "manual_reviews_source": "ручная вставка"}
+        )
+        self.assertIs(file_selected, reviews)
+        self.assertEqual(file_source, "reviews.csv")
+        self.assertIs(manual_selected, reviews)
+        self.assertEqual(manual_source, "ручная вставка")
 
 
 if __name__ == "__main__":

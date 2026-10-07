@@ -1,4 +1,5 @@
 import streamlit as st
+import time
 from streamlit.runtime.scriptrunner import get_script_run_ctx
 
 if __name__ == "__main__" and get_script_run_ctx(suppress_warning=True) is None:
@@ -27,7 +28,8 @@ from ui.dashboard.pages import (
     render_research,
     render_reviews,
 )
-from ui.dashboard.services import run_analysis_from_frame
+from ui.dashboard.services import run_advanced_analysis_for_result, run_analysis_from_frame
+from ui.dashboard.training import render_training_sidebar
 
 
 st.set_page_config(
@@ -41,6 +43,7 @@ logger = setup_logging()
 
 def main() -> None:
     logger.info("Streamlit app started")
+    render_training_sidebar()
     render_header()
     render_loader()
     options = render_analysis_settings()
@@ -48,23 +51,13 @@ def main() -> None:
         "Analysis settings: method=%s model=RuBERT tiny",
         options["method"],
     )
-    active_input_type = st.session_state.get("active_input_type")
-    has_url_reviews = active_input_type == "url" and "url_reviews" in st.session_state
-    has_file_reviews = active_input_type in {"file", "manual"} and "file_reviews" in st.session_state
-    has_reviews = has_url_reviews or has_file_reviews
-    source_name = (
-        st.session_state.get("url_reviews_source")
-        if has_url_reviews
-        else (st.session_state.get("file_reviews_source") if has_file_reviews else "источник не выбран")
-    )
+    active_input_type, active_frame, source_name = _get_active_source()
+    has_reviews = active_frame is not None
     render_source_status(source_name, has_reviews, can_cancel=is_operation_running() and not is_cancel_requested())
     process_pending_url_import()
 
-    active_input_type = st.session_state.get("active_input_type")
-    has_url_reviews = active_input_type == "url" and "url_reviews" in st.session_state
-    has_file_reviews = active_input_type in {"file", "manual"} and "file_reviews" in st.session_state
-    has_reviews = has_url_reviews or has_file_reviews
-    active_frame = st.session_state.get("url_reviews") if has_url_reviews else st.session_state.get("file_reviews")
+    active_input_type, active_frame, source_name = _get_active_source()
+    has_reviews = active_frame is not None
     options["active_frame"] = active_frame
 
     # Always use RuBERT transformer
@@ -75,35 +68,47 @@ def main() -> None:
         st.info("Чтобы запустить анализ, выберите файл, импортируйте отзывы по ссылке или вставьте текст вручную.")
         st.stop()
 
-    try:
-        set_operation_running(True)
-        if has_url_reviews:
-            logger.info("Running analysis from URL/manual reviews: rows=%s", len(active_frame))
+    result_key = f"analysis_result_{active_input_type}"
+    result = st.session_state.get(result_key)
+    if result is None:
+        progress_placeholder = st.empty()
+        progress_bar = progress_placeholder.progress(0, text="Подготовка анализа")
+        started_at = time.monotonic()
+
+        def on_analysis_progress(value: float, message: str) -> None:
+            elapsed = time.monotonic() - started_at
+            eta = elapsed * (1 - value) / value if value > 0.01 else 0
+            progress_bar.progress(
+                int(value * 100),
+                text=f"{message} · {int(value * 100)}% · прошло {_format_duration(elapsed)} · осталось {_format_duration(eta)}",
+            )
+
+        try:
+            set_operation_running(True)
+            logger.info("Running base analysis: source=%s rows=%s", active_input_type, len(active_frame))
             result = run_analysis_from_frame(
                 active_frame,
                 active_method,
                 cancel_check=is_cancel_requested,
+                progress_callback=on_analysis_progress,
+                include_advanced=False,
             )
-        else:
-            logger.info("Running analysis from file/manual reviews: rows=%s", len(active_frame))
-            result = run_analysis_from_frame(
-                active_frame,
-                active_method,
-                cancel_check=is_cancel_requested,
-            )
-    except RuntimeError as exc:
-        logger.warning("Operation cancelled: %s", exc)
-        clear_cancel()
-        st.warning(str(exc))
-        st.stop()
-    except Exception as exc:
-        logger.exception("Analysis failed: %s", exc)
-        st.error(f"Не удалось выполнить анализ: {exc}")
-        st.stop()
-    finally:
-        set_operation_running(False)
-        if not is_cancel_requested():
+            st.session_state[result_key] = result
+            progress_bar.progress(100, text="Основной анализ завершён")
+            progress_placeholder.empty()
+        except RuntimeError as exc:
+            logger.warning("Operation cancelled: %s", exc)
             clear_cancel()
+            st.warning(str(exc))
+            st.stop()
+        except Exception as exc:
+            logger.exception("Analysis failed: %s", exc)
+            st.error(f"Не удалось выполнить анализ: {exc}")
+            st.stop()
+        finally:
+            set_operation_running(False)
+            if not is_cancel_requested():
+                clear_cancel()
 
     filters = render_filters(result.reviews)
     logger.info("Filters: %s", filters)
@@ -122,7 +127,13 @@ def main() -> None:
     with tabs[1]:
         advanced_tabs = st.tabs(["Исследование", "Отзывы", "Качество", "Отчёт"])
         with advanced_tabs[0]:
-            render_research(filtered, result, aspect_stats)
+            if not result.advanced_ready:
+                st.info("Темы и кластеры считаются отдельно, чтобы не задерживать основной результат.")
+                if st.button("Рассчитать расширенную аналитику", type="primary"):
+                    _run_advanced_analysis(result, result_key)
+                    st.rerun()
+            else:
+                render_research(filtered, result, aspect_stats)
         with advanced_tabs[1]:
             render_reviews(filtered, result.reviews)
         with advanced_tabs[2]:
@@ -138,4 +149,47 @@ def main() -> None:
                 filters=filters,
                 options=options,
             )
+def _get_active_source():
+    source_type = st.session_state.get("active_input_type")
+    if source_type not in {"url", "file", "manual"}:
+        return None, None, "источник не выбран"
+    reviews = st.session_state.get(f"{source_type}_reviews")
+    if reviews is None:
+        return source_type, None, "источник не выбран"
+    return source_type, reviews, st.session_state.get(f"{source_type}_reviews_source", "неизвестный источник")
+
+
+def _run_advanced_analysis(result, result_key: str) -> None:
+    progress_placeholder = st.empty()
+    progress_bar = progress_placeholder.progress(0, text="Подготовка расширенного анализа")
+    started_at = time.monotonic()
+
+    def on_progress(value: float, message: str) -> None:
+        elapsed = time.monotonic() - started_at
+        eta = elapsed * (1 - value) / value if value > 0.01 else 0
+        progress_bar.progress(
+            int(value * 100),
+            text=f"{message} · {int(value * 100)}% · прошло {_format_duration(elapsed)} · осталось {_format_duration(eta)}",
+        )
+
+    try:
+        set_operation_running(True)
+        st.session_state[result_key] = run_advanced_analysis_for_result(
+            result,
+            cancel_check=is_cancel_requested,
+            progress_callback=on_progress,
+        )
+    finally:
+        set_operation_running(False)
+        progress_placeholder.empty()
+
+
+def _format_duration(seconds: float) -> str:
+    total = max(round(seconds), 0)
+    minutes, secs = divmod(total, 60)
+    if minutes:
+        return f"{minutes} мин {secs} сек"
+    return f"{secs} сек"
+
+
 main()

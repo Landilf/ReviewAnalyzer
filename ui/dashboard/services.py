@@ -2,7 +2,7 @@ import io
 
 import pandas as pd
 
-from analysis_helpers.pipeline import analyze_reviews
+from analysis_helpers.pipeline import analyze_reviews, run_advanced_analysis
 
 
 def run_analysis(
@@ -15,8 +15,18 @@ def run_analysis(
     return analyze_reviews(data, method=method, cancel_check=cancel_check)
 
 
-def run_analysis_from_frame(data: pd.DataFrame, method: str, cancel_check=None):
-    return analyze_reviews(data, method=method, cancel_check=cancel_check)
+def run_analysis_from_frame(data: pd.DataFrame, method: str, cancel_check=None, progress_callback=None, include_advanced: bool = True):
+    return analyze_reviews(
+        data,
+        method=method,
+        cancel_check=cancel_check,
+        progress_callback=progress_callback,
+        include_advanced=include_advanced,
+    )
+
+
+def run_advanced_analysis_for_result(result, cancel_check=None, progress_callback=None):
+    return run_advanced_analysis(result, cancel_check=cancel_check, progress_callback=progress_callback)
 
 
 def analyze_dataset(

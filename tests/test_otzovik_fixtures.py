@@ -5,8 +5,11 @@ from pathlib import Path
 
 from review_parser.extractors import extract_links, extract_reviews
 from review_parser.otzovik_crawler import (
+    CrawlConfig,
     _extract_listing_page_count,
     _extract_review_links,
+    _is_rate_limited_page,
+    _is_network_error,
     _otzovik_page_url,
     _parse_otzovik_detail_html,
 )
@@ -20,6 +23,26 @@ def read_fixture(name: str) -> str:
 
 
 class OtzovikFixtureTests(unittest.TestCase):
+    def test_rate_limit_retry_schedule_increases_from_fifteen_seconds(self) -> None:
+        self.assertEqual(CrawlConfig().rate_limit_retry_delays_seconds, (15, 30, 60, 120, 180))
+
+    def test_crawler_uses_human_pacing_delays(self) -> None:
+        config = CrawlConfig()
+        self.assertEqual(config.navigation_delay_seconds, (1.5, 3.0))
+        self.assertEqual(config.scroll_delay_seconds, (0.6, 1.2))
+
+    def test_network_errors_are_recognized_for_retry(self) -> None:
+        self.assertTrue(_is_network_error(RuntimeError("net::ERR_NAME_NOT_RESOLVED")))
+        self.assertTrue(_is_network_error(RuntimeError("Timeout 45000ms exceeded")))
+
+    def test_rate_limit_page_is_recognized_as_blocked(self) -> None:
+        html = """
+        <html><body>С Вашего IP-адреса зарегистрировано <strong>очень много</strong> обращений к нашему серверу.
+        Если причину устранить, то доступ к сайту автоматически восстановится через некоторое время.</body></html>
+        """
+
+        self.assertTrue(_is_rate_limited_page("Otzovik", html))
+
     def test_listing_fixture_contains_review_links_for_detail_pages(self) -> None:
         html = read_fixture("test_main_page.html")
         base_url = "https://otzovik.com/reviews/smartphone_xiaomi_15t/"

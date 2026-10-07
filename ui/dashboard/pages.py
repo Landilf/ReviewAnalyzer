@@ -77,6 +77,7 @@ def process_pending_url_import() -> None:
         st.stop()
 
     st.session_state["url_reviews"] = scrape_result.reviews
+    st.session_state.pop("analysis_result_url", None)
     st.session_state["url_reviews_source"] = scrape_result.source
     st.session_state["active_input_type"] = "url"
     st.session_state["url_reviews_meta"] = {
@@ -109,6 +110,7 @@ def _restore_url_checkpoint(url: str, reason: str) -> bool:
 
     source = urlparse(url).netloc.replace("www.", "") or "unknown"
     st.session_state["url_reviews"] = checkpoint
+    st.session_state.pop("analysis_result_url", None)
     st.session_state["url_reviews_source"] = source
     st.session_state["active_input_type"] = "url"
     st.session_state["url_reviews_meta"] = {
@@ -242,6 +244,7 @@ def render_loader() -> None:
                 if preview_df is None or current_source != uploaded_file.name:
                     preview_df = _read_uploaded_reviews(uploaded_file)
                     st.session_state["file_reviews"] = preview_df
+                    st.session_state.pop("analysis_result_file", None)
                     st.session_state["file_reviews_source"] = uploaded_file.name
                     st.session_state["file_reviews_meta"] = {
                         "source": "file-upload",
@@ -281,10 +284,11 @@ def render_loader() -> None:
                 logger.warning("Manual import produced empty dataset")
                 st.error("Не удалось выделить отзывы из текста. Разделяйте отзывы пустыми строками.")
             else:
-                st.session_state["file_reviews"] = manual_reviews
-                st.session_state["file_reviews_source"] = "ручная вставка"
+                st.session_state["manual_reviews"] = manual_reviews
+                st.session_state.pop("analysis_result_manual", None)
+                st.session_state["manual_reviews_source"] = "ручная вставка"
                 st.session_state["active_input_type"] = "manual"
-                st.session_state["file_reviews_meta"] = {
+                st.session_state["manual_reviews_meta"] = {
                     "source": "manual-input",
                     "label": "manual-import",
                     "created_at": pd.Timestamp.now().strftime("%Y-%m-%d_%H-%M-%S"),
@@ -296,21 +300,21 @@ def render_loader() -> None:
                 st.success(f"Загружено {len(manual_reviews)} отзывов из вставленного текста.")
                 st.rerun()
 
-        if "file_reviews" in st.session_state and st.session_state.get("file_reviews_source") == "ручная вставка":
+        if "manual_reviews" in st.session_state:
             st.success("Сейчас используются отзывы из ручной вставки.")
-            st.dataframe(localize_columns(st.session_state["file_reviews"].head(20)), use_container_width=True, hide_index=True)
+            st.dataframe(localize_columns(st.session_state["manual_reviews"].head(20)), use_container_width=True, hide_index=True)
 
 
 def _render_current_review_downloads(input_types: set[str]) -> None:
     """Keeps the current result downloadable before another import can replace it."""
-    if st.session_state.get("active_input_type") not in input_types:
+    if len(input_types) != 1:
         return
-
-    reviews, source_name, metadata = _get_current_review_download(st.session_state)
+    source_type = next(iter(input_types))
+    reviews, source_name, metadata = _get_review_download(st.session_state, source_type)
     if not isinstance(reviews, pd.DataFrame) or reviews.empty:
         return
 
-    if "url" in input_types:
+    if source_type == "url":
         notice = st.session_state.get("url_reviews_notice")
         if notice:
             st.warning(notice)
@@ -326,14 +330,22 @@ def _render_current_review_downloads(input_types: set[str]) -> None:
 
 def _get_current_review_download(state: Mapping) -> tuple[pd.DataFrame | None, str, dict]:
     active_input_type = state.get("active_input_type")
-    if active_input_type == "url":
+    return _get_review_download(state, str(active_input_type))
+
+
+def _get_review_download(state: Mapping, source_type: str) -> tuple[pd.DataFrame | None, str, dict]:
+    if source_type == "url":
         reviews = state.get("url_reviews")
         source_name = state.get("url_reviews_source", "unknown")
         metadata = state.get("url_reviews_meta", {})
-    elif active_input_type in {"file", "manual"}:
+    elif source_type == "file":
         reviews = state.get("file_reviews")
         source_name = state.get("file_reviews_source", "unknown")
         metadata = state.get("file_reviews_meta", {})
+    elif source_type == "manual":
+        reviews = state.get("manual_reviews")
+        source_name = state.get("manual_reviews_source", "unknown")
+        metadata = state.get("manual_reviews_meta", {})
     else:
         return None, "unknown", {}
     return reviews, str(source_name), metadata if isinstance(metadata, dict) else {}

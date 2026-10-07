@@ -11,13 +11,14 @@ from sklearn.cluster import KMeans
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 from analysis_helpers.aspects import extract_aspects_simple
-from analysis_helpers.config import RANDOM_STATE
+from analysis_helpers.config import MODEL_MAX_TOKENS, RANDOM_STATE
 from analysis_helpers.evaluation import evaluate
 from analysis_helpers.sentiment import sentiment_with_transformer, sentiment_without_spacy
 from analysis_helpers.topics import describe_topics, topic_modeling
 
 
 CancelCheck = Callable[[], bool] | None
+ProgressCallback = Callable[[float, str], None]
 
 
 SENTIMENT_ORDER = ["negative", "neutral", "positive"]
@@ -38,6 +39,7 @@ class AnalysisResult:
     model_comparison: pd.DataFrame
     confusion: pd.DataFrame
     model_name: str
+    advanced_ready: bool = True
 
 
 def normalize_sentiment(label: str) -> str:
@@ -90,8 +92,11 @@ def analyze_reviews(
     data: pd.DataFrame,
     method: str = "transformer",
     cancel_check: CancelCheck = None,
+    progress_callback: ProgressCallback | None = None,
+    include_advanced: bool = True,
 ) -> AnalysisResult:
     _check_cancel(cancel_check)
+    _report_progress(progress_callback, 0.03, "Подготовка отзывов")
     reviews = ensure_review_columns(data)
     texts = reviews["text"].tolist()
     labels = reviews["label"].tolist() if "label" in reviews.columns else None
@@ -100,15 +105,22 @@ def analyze_reviews(
         method = "transformer"
 
     if method == "transformer":
+        _report_progress(progress_callback, 0.08, "Загрузка модели тональности")
         classifier = sentiment_with_transformer()
         predictions = []
         confidences = []
         for start in range(0, len(texts), 16):
             _check_cancel(cancel_check)
             batch = texts[start:start + 16]
-            raw_predictions = classifier(batch, truncation=True, max_length=512)
+            raw_predictions = classifier(batch, truncation=True, max_length=MODEL_MAX_TOKENS)
             predictions.extend(normalize_sentiment(p["label"]) for p in raw_predictions)
             confidences.extend(round(float(p["score"]), 4) for p in raw_predictions)
+            completed = min(start + len(batch), len(texts))
+            _report_progress(
+                progress_callback,
+                0.08 + 0.57 * completed / max(len(texts), 1),
+                f"Анализ тональности: {completed} из {len(texts)}",
+            )
         model_name = "RuBERT tiny"
     else:
         _check_cancel(cancel_check)
@@ -116,6 +128,7 @@ def analyze_reviews(
         model_name = "TF-IDF + Logistic Regression"
 
     _check_cancel(cancel_check)
+    _report_progress(progress_callback, 0.68, "Извлечение аспектов")
     reviews["aspects"] = _extract_aspects(texts)
 
     reviews["predicted_sentiment"] = predictions
@@ -129,24 +142,48 @@ def analyze_reviews(
     reviews["aspects_text"] = reviews["aspects"].apply(lambda values: ", ".join(values))
 
     _check_cancel(cancel_check)
+    _report_progress(progress_callback, 0.80, "Расчёт сводных показателей")
     aspect_stats = build_aspect_stats(reviews)
-    topics, topic_terms, topic_labels = build_topic_frames(reviews, cancel_check=cancel_check)
-    reviews["topic"] = topic_labels
-    reviews["cluster"] = build_clusters(reviews, cancel_check=cancel_check)
-
     confusion = build_confusion_matrix(reviews)
     model_comparison = build_model_comparison(reviews, metrics, model_name)
-
-    return AnalysisResult(
+    result = AnalysisResult(
         reviews=reviews,
         metrics=metrics,
-        topics=topics,
-        topic_terms=topic_terms,
+        topics=pd.DataFrame(columns=["topic", "review_count", "share"]),
+        topic_terms=pd.DataFrame(columns=["topic", "term", "weight"]),
         aspect_stats=aspect_stats,
         model_comparison=model_comparison,
         confusion=confusion,
         model_name=model_name,
+        advanced_ready=False,
     )
+    if include_advanced:
+        return run_advanced_analysis(result, cancel_check=cancel_check, progress_callback=progress_callback)
+    result.reviews["topic"] = "Не рассчитано"
+    result.reviews["cluster"] = "Не рассчитано"
+    _report_progress(progress_callback, 1.0, "Основной анализ завершён")
+    return result
+
+
+def run_advanced_analysis(
+    result: AnalysisResult,
+    cancel_check: CancelCheck = None,
+    progress_callback: ProgressCallback | None = None,
+) -> AnalysisResult:
+    if result.advanced_ready:
+        return result
+    _check_cancel(cancel_check)
+    _report_progress(progress_callback, 0.05, "Тематическое моделирование")
+    topics, topic_terms, topic_labels = build_topic_frames(result.reviews, cancel_check=cancel_check)
+    result.reviews["topic"] = topic_labels
+    _check_cancel(cancel_check)
+    _report_progress(progress_callback, 0.55, "Кластеризация отзывов")
+    result.reviews["cluster"] = build_clusters(result.reviews, cancel_check=cancel_check)
+    result.topics = topics
+    result.topic_terms = topic_terms
+    result.advanced_ready = True
+    _report_progress(progress_callback, 1.0, "Расширенный анализ завершён")
+    return result
 
 
 def build_aspect_stats(reviews: pd.DataFrame, limit: int = 40) -> pd.DataFrame:
@@ -307,3 +344,8 @@ def _extract_aspects(texts: list[str]) -> list[list[str]]:
 def _check_cancel(cancel_check: CancelCheck) -> None:
     if cancel_check and cancel_check():
         raise RuntimeError("Операция отменена пользователем.")
+
+
+def _report_progress(progress_callback: ProgressCallback | None, value: float, message: str) -> None:
+    if progress_callback:
+        progress_callback(max(0.0, min(value, 1.0)), message)

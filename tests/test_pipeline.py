@@ -36,6 +36,33 @@ class EnsureReviewColumnsTests(unittest.TestCase):
 
 
 class AnalyzeReviewsTests(unittest.TestCase):
+    @patch("analysis_helpers.pipeline.build_clusters")
+    @patch("analysis_helpers.pipeline.build_topic_frames")
+    @patch("analysis_helpers.pipeline._extract_aspects", return_value=[["качество"]])
+    @patch("analysis_helpers.pipeline.sentiment_with_transformer")
+    def test_base_analysis_defers_topics_and_clusters(
+        self,
+        sentiment_with_transformer_mock,
+        extract_aspects_mock,
+        build_topic_frames_mock,
+        build_clusters_mock,
+    ) -> None:
+        sentiment_with_transformer_mock.return_value = lambda batch, **_: [{"label": "LABEL_2", "score": 0.9}]
+        progress = []
+
+        result = analyze_reviews(
+            pd.DataFrame({"text": ["Хороший товар"]}),
+            include_advanced=False,
+            progress_callback=lambda value, _: progress.append(value),
+        )
+
+        self.assertFalse(result.advanced_ready)
+        self.assertEqual(result.reviews["topic"].tolist(), ["Не рассчитано"])
+        self.assertEqual(result.reviews["cluster"].tolist(), ["Не рассчитано"])
+        build_topic_frames_mock.assert_not_called()
+        build_clusters_mock.assert_not_called()
+        self.assertEqual(progress[-1], 1.0)
+
     @patch("analysis_helpers.pipeline.sentiment_with_transformer")
     @patch("analysis_helpers.pipeline._extract_aspects")
     @patch("analysis_helpers.pipeline.build_topic_frames")

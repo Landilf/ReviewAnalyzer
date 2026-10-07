@@ -1,0 +1,518 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Экспериментальный отчёт ReviewAnalyzer</title>
+  <style>
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 40px; color: #1e293b; background: #f8fafc; line-height: 1.6; }
+    .container { max-width: 1100px; margin: 0 auto; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); }
+    h1 { color: #0f172a; border-bottom: 2px solid #e2e8f0; padding-bottom: 16px; margin-bottom: 18px; font-size: 28px; }
+    .subtitle { color: #475569; margin-top: 0; margin-bottom: 28px; }
+    h2 { color: #1e293b; margin-top: 34px; border-left: 4px solid #3b82f6; padding-left: 12px; font-size: 20px; }
+    .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
+    .stat-card { background: #f1f5f9; padding: 16px; border-radius: 8px; text-align: center; min-height: 92px; }
+    .stat-value { display: block; font-size: 24px; font-weight: bold; color: #3b82f6; }
+    .stat-label { font-size: 12px; text-transform: uppercase; color: #64748b; letter-spacing: 1px; }
+    .meta-note { background: #eff6ff; border-left: 4px solid #3b82f6; padding: 14px 16px; border-radius: 0 6px 6px 0; margin: 18px 0 0; }
+    .comparison-box { background: #f8fafc; border: 1px solid #e2e8f0; padding: 16px; border-radius: 10px; margin-top: 16px; }
+    table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 14px; }
+    th { background: #f1f5f9; color: #475569; font-weight: 600; text-align: left; padding: 12px; border-bottom: 2px solid #e2e8f0; }
+    td { padding: 12px; border-bottom: 1px solid #f1f5f9; }
+    .insight-list, .recommendation-list { list-style: none; padding: 0; }
+    .insight-list li { background: #eff6ff; border-left: 4px solid #3b82f6; padding: 12px; margin-bottom: 8px; border-radius: 0 4px 4px 0; }
+    .recommendation-list li { background: #fff7ed; border-left: 4px solid #f97316; padding: 12px; margin-bottom: 8px; border-radius: 0 4px 4px 0; }
+    .section-grid { display: grid; grid-template-columns: 1.2fr 0.8fr; gap: 18px; align-items: start; }
+    .small { font-size: 13px; color: #64748b; }
+    pre { white-space: pre-wrap; word-break: break-word; background: #0f172a; color: #e2e8f0; padding: 18px; border-radius: 10px; overflow-x: auto; }
+    .footer { margin-top: 40px; font-size: 12px; color: #94a3b8; text-align: center; border-top: 1px solid #e2e8f0; padding-top: 20px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Экспериментальный HTML-отчёт ReviewAnalyzer</h1>
+    <p class="subtitle">Формат отчёта предназначен для сравнения нескольких прогонов модели на одном или сопоставимом наборе данных. Один HTML-файл = один эксперимент.</p>
+
+    <div class="stats-grid">
+      <div class="stat-card">
+        <span class="stat-value">4383</span>
+        <span class="stat-label">Отзывов в отчёте</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-value">78.0%</span>
+        <span class="stat-label">Уверенность модели</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-value">40</span>
+        <span class="stat-label">Извлечено аспектов</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-value">1</span>
+        <span class="stat-label">Тем в отчёте</span>
+      </div>
+    </div>
+
+    <div class="comparison-box">
+      <strong>Как использовать для сравнения моделей:</strong>
+      <div class="small">
+        Сравнивайте два HTML-отчёта по блоку метрик, матрице ошибок, доле негативных отзывов, качеству выводов и списку проблемных аспектов.
+        Если названия моделей, источник данных и фильтры совпадают, различия в результатах отражают поведение моделей на одинаковом наборе.
+      </div>
+    </div>
+
+    <h2>Паспорт эксперимента</h2>
+    <table border="1" class="dataframe table">
+  <thead>
+    <tr style="text-align: right;">
+      <th>Параметр</th>
+      <th>Значение</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Источник данных</td>
+      <td>parsed_reviews_otzovik.com_2026-10-02_01-04-01.csv</td>
+    </tr>
+    <tr>
+      <td>Модель</td>
+      <td>RuBERT tiny</td>
+    </tr>
+    <tr>
+      <td>Количество отзывов</td>
+      <td>4383</td>
+    </tr>
+    <tr>
+      <td>Средняя уверенность</td>
+      <td>78.0%</td>
+    </tr>
+    <tr>
+      <td>Доля негативных отзывов</td>
+      <td>4.8%</td>
+    </tr>
+    <tr>
+      <td>Доля позитивных отзывов</td>
+      <td>73.3%</td>
+    </tr>
+    <tr>
+      <td>Фильтр: sentiments</td>
+      <td>negative, neutral, positive</td>
+    </tr>
+    <tr>
+      <td>Фильтр: categories</td>
+      <td>otzovik.com</td>
+    </tr>
+    <tr>
+      <td>Фильтр: confidence_range</td>
+      <td>0.0, 1.0</td>
+    </tr>
+    <tr>
+      <td>Фильтр: keyword</td>
+      <td></td>
+    </tr>
+  </tbody>
+</table>
+
+    <div class="section-grid">
+      <div>
+        <h2>Метрики модели</h2>
+        <table border="1" class="dataframe table">
+  <thead>
+    <tr style="text-align: right;">
+      <th>Метрика</th>
+      <th>Значение</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>accuracy</td>
+      <td>0.7431</td>
+    </tr>
+    <tr>
+      <td>precision</td>
+      <td>0.8954</td>
+    </tr>
+    <tr>
+      <td>recall</td>
+      <td>0.7431</td>
+    </tr>
+    <tr>
+      <td>F1</td>
+      <td>0.8029</td>
+    </tr>
+  </tbody>
+</table>
+
+        <h2>Матрица ошибок</h2>
+        <table border="1" class="dataframe table">
+  <thead>
+    <tr style="text-align: right;">
+      <th>Предсказание</th>
+      <th>negative</th>
+      <th>neutral</th>
+      <th>positive</th>
+    </tr>
+    <tr>
+      <th>Истинная метка</th>
+      <th></th>
+      <th></th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th>negative</th>
+      <td>46</td>
+      <td>50</td>
+      <td>26</td>
+    </tr>
+    <tr>
+      <th>neutral</th>
+      <td>33</td>
+      <td>118</td>
+      <td>93</td>
+    </tr>
+    <tr>
+      <th>positive</th>
+      <td>133</td>
+      <td>791</td>
+      <td>3093</td>
+    </tr>
+  </tbody>
+</table>
+      </div>
+      <div>
+        <h2>Автоматические выводы</h2>
+        <ul class="insight-list">
+          <li>Преобладающая тональность — позитивные (73.3% отзывов).</li><li>Наиболее проблемный аспект — «деньга»: 10.9% негативных упоминаний.</li><li>16.9% отзывов классифицированы с низкой уверенностью; их стоит проверить вручную.</li>
+        </ul>
+
+        <h2>Ключевые рекомендации</h2>
+        <ul class="recommendation-list">
+          <li>Проверить аспект «деньга»: высокая доля негатива (10.9%) при 267 упоминаниях.</li><li>Проверить аспект «раз»: высокая доля негатива (8.1%) при 456 упоминаниях.</li><li>Проверить аспект «момент»: высокая доля негатива (7.5%) при 226 упоминаниях.</li>
+        </ul>
+      </div>
+    </div>
+
+    <h2>Распределение тональности</h2>
+    <table border="1" class="dataframe table">
+  <thead>
+    <tr style="text-align: right;">
+      <th>Тональность</th>
+      <th>Отзывов</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Позитивные</td>
+      <td>3212</td>
+    </tr>
+    <tr>
+      <td>Нейтральные</td>
+      <td>959</td>
+    </tr>
+    <tr>
+      <td>Негативные</td>
+      <td>212</td>
+    </tr>
+  </tbody>
+</table>
+
+    <h2>Анализ проблемных аспектов</h2>
+    <p class="small">Топ-10 аспектов с наибольшей долей негативных упоминаний</p>
+    <table border="1" class="dataframe table">
+  <thead>
+    <tr style="text-align: right;">
+      <th>sentiment</th>
+      <th>aspect</th>
+      <th>negative</th>
+      <th>neutral</th>
+      <th>positive</th>
+      <th>mentions</th>
+      <th>negative_share</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th></th>
+      <td>телефон</td>
+      <td>140</td>
+      <td>514</td>
+      <td>1837</td>
+      <td>2491</td>
+      <td>0.056</td>
+    </tr>
+    <tr>
+      <th></th>
+      <td>камера</td>
+      <td>71</td>
+      <td>442</td>
+      <td>1755</td>
+      <td>2268</td>
+      <td>0.031</td>
+    </tr>
+    <tr>
+      <th></th>
+      <td>дизайн</td>
+      <td>24</td>
+      <td>251</td>
+      <td>1042</td>
+      <td>1317</td>
+      <td>0.018</td>
+    </tr>
+    <tr>
+      <th></th>
+      <td>смартфон</td>
+      <td>56</td>
+      <td>248</td>
+      <td>966</td>
+      <td>1270</td>
+      <td>0.044</td>
+    </tr>
+    <tr>
+      <th></th>
+      <td>iphone</td>
+      <td>44</td>
+      <td>271</td>
+      <td>936</td>
+      <td>1251</td>
+      <td>0.035</td>
+    </tr>
+    <tr>
+      <th></th>
+      <td>батарея</td>
+      <td>49</td>
+      <td>252</td>
+      <td>706</td>
+      <td>1007</td>
+      <td>0.049</td>
+    </tr>
+    <tr>
+      <th></th>
+      <td>apple</td>
+      <td>41</td>
+      <td>179</td>
+      <td>677</td>
+      <td>897</td>
+      <td>0.046</td>
+    </tr>
+    <tr>
+      <th></th>
+      <td>экран</td>
+      <td>40</td>
+      <td>201</td>
+      <td>609</td>
+      <td>850</td>
+      <td>0.047</td>
+    </tr>
+    <tr>
+      <th></th>
+      <td>рука</td>
+      <td>28</td>
+      <td>154</td>
+      <td>567</td>
+      <td>749</td>
+      <td>0.037</td>
+    </tr>
+    <tr>
+      <th></th>
+      <td>айфон</td>
+      <td>39</td>
+      <td>156</td>
+      <td>440</td>
+      <td>635</td>
+      <td>0.061</td>
+    </tr>
+  </tbody>
+</table>
+
+    <h2>Тематические группы (LDA)</h2>
+    <table border="1" class="dataframe table">
+  <thead>
+    <tr style="text-align: right;">
+      <th>topic</th>
+      <th>review_count</th>
+      <th>share</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Не рассчитано</td>
+      <td>4383</td>
+      <td>1.0</td>
+    </tr>
+  </tbody>
+</table>
+
+    <h2>Сырые данные эксперимента</h2>
+    <p class="small">Ниже сохранён JSON-блок с ключевыми метаданными отчёта. Он помогает быстро сравнивать несколько HTML-файлов программно или вручную.</p>
+    <pre><code>{
+  "model_name": "RuBERT tiny",
+  "source_name": "parsed_reviews_otzovik.com_2026-10-02_01-04-01.csv",
+  "metrics": {
+    "accuracy": 0.7430983344741044,
+    "precision": 0.8954301942825811,
+    "recall": 0.7430983344741044,
+    "F1": 0.8028517217132851
+  },
+  "summary": {
+    "total_reviews": 4383,
+    "avg_confidence": 0.7796,
+    "negative_share": 0.0484,
+    "positive_share": 0.7328
+  },
+  "insights": [
+    "Преобладающая тональность — позитивные (73.3% отзывов).",
+    "Наиболее проблемный аспект — «деньга»: 10.9% негативных упоминаний.",
+    "16.9% отзывов классифицированы с низкой уверенностью; их стоит проверить вручную."
+  ],
+  "recommendations": [
+    "Проверить аспект «деньга»: высокая доля негатива (10.9%) при 267 упоминаниях.",
+    "Проверить аспект «раз»: высокая доля негатива (8.1%) при 456 упоминаниях.",
+    "Проверить аспект «момент»: высокая доля негатива (7.5%) при 226 упоминаниях."
+  ],
+  "filters": {
+    "sentiments": [
+      "negative",
+      "neutral",
+      "positive"
+    ],
+    "categories": [
+      "otzovik.com"
+    ],
+    "confidence_range": [
+      0.0,
+      1.0
+    ],
+    "keyword": ""
+  },
+  "sentiment_distribution": [
+    {
+      "Тональность": "Позитивные",
+      "Отзывов": 3212
+    },
+    {
+      "Тональность": "Нейтральные",
+      "Отзывов": 959
+    },
+    {
+      "Тональность": "Негативные",
+      "Отзывов": 212
+    }
+  ],
+  "aspect_stats_top10": [
+    {
+      "aspect": "телефон",
+      "negative": 140,
+      "neutral": 514,
+      "positive": 1837,
+      "mentions": 2491,
+      "negative_share": 0.056
+    },
+    {
+      "aspect": "камера",
+      "negative": 71,
+      "neutral": 442,
+      "positive": 1755,
+      "mentions": 2268,
+      "negative_share": 0.031
+    },
+    {
+      "aspect": "дизайн",
+      "negative": 24,
+      "neutral": 251,
+      "positive": 1042,
+      "mentions": 1317,
+      "negative_share": 0.018
+    },
+    {
+      "aspect": "смартфон",
+      "negative": 56,
+      "neutral": 248,
+      "positive": 966,
+      "mentions": 1270,
+      "negative_share": 0.044
+    },
+    {
+      "aspect": "iphone",
+      "negative": 44,
+      "neutral": 271,
+      "positive": 936,
+      "mentions": 1251,
+      "negative_share": 0.035
+    },
+    {
+      "aspect": "батарея",
+      "negative": 49,
+      "neutral": 252,
+      "positive": 706,
+      "mentions": 1007,
+      "negative_share": 0.049
+    },
+    {
+      "aspect": "apple",
+      "negative": 41,
+      "neutral": 179,
+      "positive": 677,
+      "mentions": 897,
+      "negative_share": 0.046
+    },
+    {
+      "aspect": "экран",
+      "negative": 40,
+      "neutral": 201,
+      "positive": 609,
+      "mentions": 850,
+      "negative_share": 0.047
+    },
+    {
+      "aspect": "рука",
+      "negative": 28,
+      "neutral": 154,
+      "positive": 567,
+      "mentions": 749,
+      "negative_share": 0.037
+    },
+    {
+      "aspect": "айфон",
+      "negative": 39,
+      "neutral": 156,
+      "positive": 440,
+      "mentions": 635,
+      "negative_share": 0.061
+    }
+  ],
+  "topics": [
+    {
+      "topic": "Не рассчитано",
+      "review_count": 4383,
+      "share": 1.0
+    }
+  ],
+  "confusion_matrix": [
+    {
+      "Истинная метка": "negative",
+      "negative": 46,
+      "neutral": 50,
+      "positive": 26
+    },
+    {
+      "Истинная метка": "neutral",
+      "negative": 33,
+      "neutral": 118,
+      "positive": 93
+    },
+    {
+      "Истинная метка": "positive",
+      "negative": 133,
+      "neutral": 791,
+      "positive": 3093
+    }
+  ]
+}</code></pre>
+
+    <div class="footer">
+      Сгенерировано системой ReviewAnalyzer • 2026-10-07 17:56
+    </div>
+  </div>
+</body>
+</html>

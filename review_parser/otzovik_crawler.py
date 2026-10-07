@@ -24,6 +24,10 @@ CheckpointCallback = Callable[[pd.DataFrame], None]
 class CrawlConfig:
     timeout_ms: int = 45000
     max_retries: int = 4
+    rate_limit_retry_delays_seconds: tuple[int, ...] = (15, 30, 60, 120, 180)
+    network_retry_delays_seconds: tuple[int, ...] = (5, 15, 30)
+    navigation_delay_seconds: tuple[float, float] = (1.5, 3.0)
+    scroll_delay_seconds: tuple[float, float] = (0.6, 1.2)
     headless: bool = True
 
 
@@ -34,6 +38,14 @@ class PartialCrawlError(RuntimeError):
         self.reviews = reviews
         self.reason = str(reason)
         super().__init__(f"Сбор прерван: {self.reason}")
+
+
+class RateLimitedError(ValueError):
+    """Otzovik temporarily blocked the current IP for excessive requests."""
+
+
+class NetworkUnavailableError(ConnectionError):
+    """Network error while loading an Otzovik page."""
 
 
 def crawl_otzovik_reviews(
@@ -101,7 +113,7 @@ async def _crawl_otzovik_reviews(
             log_static_resource_failures(main_page, logger)
 
             await _safe_goto(main_page, listing_url, config, "listing_page", progress, cancel_check)
-            await _soft_scroll(main_page)
+            await _soft_scroll(main_page, config, cancel_check)
 
             # Step 1: Extract reviews available directly on the listing page
             listing_html = await main_page.content()
@@ -141,7 +153,7 @@ async def _crawl_otzovik_reviews(
                             min(item_progress, 0.97),
                             progress_text,
                         )
-                        row = await _parse_review_detail_reused(main_page, link, config, cancel_check)
+                        row = await _parse_review_detail_reused(main_page, link, config, progress, cancel_check)
                         if row:
                             rows.append(row)
                             parsed_detail_reviews += 1
@@ -157,6 +169,8 @@ async def _crawl_otzovik_reviews(
                                 failed_detail_reviews,
                                 len(rows),
                             )
+                except (RateLimitedError, NetworkUnavailableError, RuntimeError):
+                    raise
                 except Exception as exc:
                     logger.warning("Otzovik detail parsing interrupted: %s. Returning partial results (%s rows).", exc, len(rows))
                     if not rows:
@@ -223,7 +237,7 @@ async def _collect_review_links(
         current_url = _otzovik_page_url(listing_url, page_idx) if is_review_catalog else listing_url
         if page_idx > 1:
             await _safe_goto(page, current_url, config, f"listing_page_{page_idx}", progress, cancel_check)
-            await _soft_scroll(page)
+            await _soft_scroll(page, config, cancel_check)
         if page_idx == 1:
             scan_progress = 0.05
             scan_message = "Сканирую страницу 1"
@@ -294,11 +308,17 @@ async def _collect_review_links(
     return collected if limit is None else collected[:limit]
 
 
-async def _parse_review_detail_reused(page, link: str, config: CrawlConfig, cancel_check: CancelCheck = None) -> dict | None:
+async def _parse_review_detail_reused(
+    page,
+    link: str,
+    config: CrawlConfig,
+    progress: ProgressCallback | None = None,
+    cancel_check: CancelCheck = None,
+) -> dict | None:
     try:
         _check_cancel(cancel_check)
-        await _safe_goto(page, link, config, "review_detail", cancel_check=cancel_check)
-        await _soft_scroll(page)
+        await _safe_goto(page, link, config, "review_detail", progress, cancel_check)
+        await _soft_scroll(page, config, cancel_check)
         html = await page.content()
         title = await page.title()
         if _is_blocked_page(title, html):
@@ -316,7 +336,7 @@ async def _parse_review_detail_reused(page, link: str, config: CrawlConfig, canc
         else:
             logger.warning("Detail parsed empty: url=%s", link)
         return row
-    except RuntimeError:
+    except (RateLimitedError, NetworkUnavailableError, RuntimeError):
         raise
     except Exception as exc:
         logger.warning("Failed to parse detail page %s: %s", link, exc)
@@ -438,21 +458,31 @@ async def _safe_goto(
     cancel_check: CancelCheck = None,
 ) -> None:
     last_error = None
-    
-    for attempt in range(1, config.max_retries + 1):
+    max_attempts = max(
+        config.max_retries,
+        len(config.rate_limit_retry_delays_seconds) + 1,
+        len(config.network_retry_delays_seconds) + 1,
+    )
+
+    for attempt in range(1, max_attempts + 1):
         try:
             _check_cancel(cancel_check)
-            logger.info("Goto %s attempt %s/%s: %s", action_name, attempt, config.max_retries, url)
-            
+            logger.info("Goto %s attempt %s/%s: %s", action_name, attempt, max_attempts, url)
+            await _wait_random_with_cancel(config.navigation_delay_seconds, cancel_check)
             response = await page.goto(url, wait_until="domcontentloaded", timeout=config.timeout_ms)
             status = response.status if response else None
             
-            if status in {401, 403, 429}:
+            if status == 429:
+                raise RateLimitedError("HTTP 429")
+            if status in {401, 403}:
                 raise ValueError(f"HTTP {status}")
                 
             title = await page.title()
             html = await page.content()
             
+            if _is_rate_limited_page(title, html):
+                raise RateLimitedError("Otzovik ограничил число обращений с текущего IP")
+
             if _is_blocked_page(title, html):
                 if not config.headless:
                     # WAIT FOR USER
@@ -466,12 +496,41 @@ async def _safe_goto(
                 
             return
             
+        except RateLimitedError as exc:
+            last_error = exc
+            logger.warning("Rate limit on %s attempt %s/%s: %s", action_name, attempt, max_attempts, exc)
+            delay_index = attempt - 1
+            if delay_index >= len(config.rate_limit_retry_delays_seconds):
+                break
+            delay_seconds = config.rate_limit_retry_delays_seconds[delay_index]
+            if progress:
+                progress(
+                    0.05,
+                    f"Otzovik временно ограничил обращения · Повтор через {_format_duration(delay_seconds)}",
+                )
+            await _wait_with_cancel(delay_seconds, cancel_check)
         except Exception as exc:
             last_error = exc
-            logger.warning("Goto failed %s attempt %s: %s", action_name, attempt, exc)
+            if _is_network_error(exc):
+                delay_index = attempt - 1
+                if delay_index >= len(config.network_retry_delays_seconds):
+                    break
+                delay_seconds = config.network_retry_delays_seconds[delay_index]
+                logger.warning("Network error on %s attempt %s/%s: %s", action_name, attempt, max_attempts, exc)
+                if progress:
+                    progress(0.05, f"Нет соединения с сайтом · Повтор через {_format_duration(delay_seconds)}")
+                await _wait_with_cancel(delay_seconds, cancel_check)
+                continue
+            logger.warning("Goto failed %s attempt %s/%s: %s", action_name, attempt, config.max_retries, exc)
             if attempt < config.max_retries:
                 logger.info("Retrying %s immediately", action_name)
+            else:
+                break
                 
+    if isinstance(last_error, RateLimitedError):
+        raise RateLimitedError(f"Otzovik не снял ограничение после {max_attempts} попыток: {last_error}")
+    if _is_network_error(last_error):
+        raise NetworkUnavailableError(f"Не удалось восстановить соединение после повторов: {last_error}")
     raise ValueError(f"Не удалось загрузить страницу ({action_name}): {last_error}")
 
 
@@ -503,9 +562,12 @@ async def _wait_for_captcha_solve(
             raise
 
 
-async def _soft_scroll(page) -> None:
-    for _ in range(3):
+async def _soft_scroll(page, config: CrawlConfig, cancel_check: CancelCheck = None) -> None:
+    for step in range(3):
+        _check_cancel(cancel_check)
         await page.mouse.wheel(0, random.randint(700, 1300))
+        if step < 2:
+            await _wait_random_with_cancel(config.scroll_delay_seconds, cancel_check)
 
 
 def _extract_reviews_from_listing(html: str, base_url: str) -> list[dict]:
@@ -641,7 +703,26 @@ def _is_blocked_page(title: str, html: str) -> bool:
         "security check", "forbidden", "вы робот", "робот?", 
         "слишком много обращений", "подозрительная активность"
     ]
-    return any(token in sample for token in blocked_tokens)
+    return _is_rate_limited_page(title, html) or any(token in sample for token in blocked_tokens)
+
+
+def _is_rate_limited_page(title: str, html: str) -> bool:
+    sample = clean_text(re.sub(r"<[^>]+>", " ", f"{title} {html[:6000]}")).lower()
+    rate_limit_tokens = [
+        "с вашего ip-адреса зарегистрировано",
+        "очень много обращений к нашему серверу",
+        "доступ к сайту автоматически восстановится",
+        "слишком много обращений",
+    ]
+    return any(token in sample for token in rate_limit_tokens)
+
+
+def _is_network_error(exc: Exception | None) -> bool:
+    if exc is None:
+        return False
+    message = str(exc).lower()
+    markers = ("timeout", "net::err_", "econnreset", "enotfound", "name not resolved", "connection refused")
+    return any(marker in message for marker in markers)
 
 
 def _deduplicate(items: list[str]) -> list[str]:
@@ -673,6 +754,24 @@ def _noop_progress(_: float, __: str) -> None:
 def _check_cancel(cancel_check: CancelCheck) -> None:
     if cancel_check and cancel_check():
         raise RuntimeError("Операция отменена пользователем.")
+
+
+async def _wait_with_cancel(seconds: float, cancel_check: CancelCheck = None) -> None:
+    deadline = time.monotonic() + seconds
+    while True:
+        _check_cancel(cancel_check)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        await asyncio.sleep(min(2.0, remaining))
+
+
+async def _wait_random_with_cancel(
+    delay_range: tuple[float, float],
+    cancel_check: CancelCheck = None,
+) -> None:
+    minimum, maximum = delay_range
+    await _wait_with_cancel(random.uniform(minimum, maximum), cancel_check)
 
 
 def _publish_checkpoint(

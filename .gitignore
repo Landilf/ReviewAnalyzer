@@ -218,6 +218,7 @@ __marimo__/
 .streamlit/secrets.toml
 
 # Runtime logs
+artifacts/
 logs/*.txt
 
 # Debug snapshots of parsed reviews

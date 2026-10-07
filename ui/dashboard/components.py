@@ -60,10 +60,11 @@ def render_source_status(source_name: str, has_reviews: bool, can_cancel: bool =
                 request_cancel()
                 st.rerun()
             if has_reviews and st.button("Сбросить текущие данные", use_container_width=True):
-                st.session_state.pop("url_reviews", None)
-                st.session_state.pop("url_reviews_source", None)
-                st.session_state.pop("file_reviews", None)
-                st.session_state.pop("file_reviews_source", None)
+                active_input_type = st.session_state.get("active_input_type")
+                if active_input_type in {"url", "file", "manual"}:
+                    for suffix in ("reviews", "reviews_source", "reviews_meta", "reviews_notice", "reviews_checkpoint"):
+                        st.session_state.pop(f"{active_input_type}_{suffix}", None)
+                    st.session_state.pop(f"analysis_result_{active_input_type}", None)
                 st.session_state.pop("active_input_type", None)
                 st.session_state.pop("sentiment_filter_mode", None)
                 st.rerun()
