@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from absa_training.registry import list_published_models
 from app_control import request_cancel
 
 
@@ -71,19 +72,33 @@ def render_source_status(source_name: str, has_reviews: bool, can_cancel: bool =
 
 
 def render_analysis_settings() -> dict:
-    st.markdown("### 1. Данные и модель")
+    st.markdown("### 1. Модель анализа")
     with st.container(border=True):
         col_left, col_right = st.columns([1.2, 1])
         with col_left:
             method = "transformer"
             st.markdown("**Модель анализа**")
-            st.caption("Используется `RuBERT tiny` как основная модель тонального анализа.")
+            selected_model = st.selectbox(
+                "Модель тонального анализа",
+                options=("RuBERT tiny — базовая",),
+                key="analysis_model_selection",
+                help="Выбор сохраняется при переходе между вкладками источников.",
+            )
+            st.caption("Базовая модель определяет общую тональность отзыва.")
         with col_right:
-            st.markdown("**Формат файла**")
-            st.caption("Минимум: `text`. Дополнительно: `label`, `date`, `category`, `rating`.")
+            published_models = list_published_models()
+            st.markdown("**Опубликованные ABSA-модели**")
+            if published_models:
+                st.caption("Опубликованы вручную и готовы к подключению к ABSA-инференсу:")
+                for model in published_models:
+                    st.caption(f"• {model['display_name']}")
+            else:
+                st.caption("Нет опубликованных ABSA-моделей.")
+            st.caption("Они не участвуют в общем тональном анализе, пока не подключен ABSA-инференс.")
 
     return {
         "method": method,
+        "selected_model": selected_model,
     }
 
 

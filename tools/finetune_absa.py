@@ -26,6 +26,8 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--batch-size", type=int, default=16)
     train.add_argument("--learning-rate", type=float, default=2e-5)
     train.add_argument("--validation-fraction", type=float, default=0.2)
+    train.add_argument("--validation-datasets", nargs="*", type=Path, default=None, help="фиксированные CSV для выбора лучшей эпохи")
+    train.add_argument("--test-datasets", nargs="*", type=Path, default=None, help="фиксированные CSV для финальной проверки лучшей эпохи")
     train.add_argument("--seed", type=int, default=42)
     train.add_argument("--statuses", nargs="*", default=None, help="включить только указанные статусы разметки")
     train.add_argument("--initial-checkpoint", type=Path, default=None, help="папка сохранённой эпохи для нового дообучения")
@@ -49,6 +51,8 @@ def main() -> None:
         return
     statuses = {item.lower() for item in args.statuses} if args.statuses is not None else None
     examples = load_examples(args.datasets, allowed_statuses=statuses)
+    validation_examples = load_examples(args.validation_datasets) if args.validation_datasets else None
+    test_examples = load_examples(args.test_datasets) if args.test_datasets else None
     run_dir = args.run_dir or Path("artifacts/absa") / datetime.now().strftime("run_%Y-%m-%d_%H-%M-%S")
     result = fine_tune(
         examples,
@@ -62,6 +66,10 @@ def main() -> None:
             random_state=args.seed,
         ),
         [str(path) for path in args.datasets],
+        validation_examples=validation_examples,
+        test_examples=test_examples,
+        validation_files=[str(path) for path in args.validation_datasets or []],
+        test_files=[str(path) for path in args.test_datasets or []],
         initial_checkpoint=args.initial_checkpoint,
     )
     print(f"Готово: {result['run_dir']}; лучшая эпоха: {result['best_epoch']}")

@@ -1,0 +1,260 @@
+{
+  "seed": 42,
+  "strategy": "Deterministic 80/10/10 split by source_dataset + review_id.",
+  "sources": [
+    {
+      "source": "data/absa/train/amazfit_bip_absa_full.csv",
+      "train": {
+        "reviews": 201,
+        "rows": 3554
+      },
+      "validation": {
+        "reviews": 25,
+        "rows": 592
+      },
+      "test": {
+        "reviews": 25,
+        "rows": 420
+      }
+    },
+    {
+      "source": "data/absa/train/canon_mf3010_absa_full.csv",
+      "train": {
+        "reviews": 60,
+        "rows": 792
+      },
+      "validation": {
+        "reviews": 8,
+        "rows": 104
+      },
+      "test": {
+        "reviews": 8,
+        "rows": 142
+      }
+    },
+    {
+      "source": "data/absa/train/canon_pixma_ts5040_absa_full.csv",
+      "train": {
+        "reviews": 28,
+        "rows": 462
+      },
+      "validation": {
+        "reviews": 4,
+        "rows": 51
+      },
+      "test": {
+        "reviews": 4,
+        "rows": 52
+      }
+    },
+    {
+      "source": "data/absa/train/dell_inspiron_n5110_absa_full.csv",
+      "train": {
+        "reviews": 55,
+        "rows": 717
+      },
+      "validation": {
+        "reviews": 7,
+        "rows": 109
+      },
+      "test": {
+        "reviews": 7,
+        "rows": 88
+      }
+    },
+    {
+      "source": "data/absa/train/epson_l210_absa_full.csv",
+      "train": {
+        "reviews": 71,
+        "rows": 920
+      },
+      "validation": {
+        "reviews": 9,
+        "rows": 145
+      },
+      "test": {
+        "reviews": 9,
+        "rows": 71
+      }
+    },
+    {
+      "source": "data/absa/train/hp_deskjet_2130_absa_full.csv",
+      "train": {
+        "reviews": 92,
+        "rows": 1337
+      },
+      "validation": {
+        "reviews": 11,
+        "rows": 108
+      },
+      "test": {
+        "reviews": 11,
+        "rows": 146
+      }
+    },
+    {
+      "source": "data/absa/train/hp_laserjet_m28a_absa_full.csv",
+      "train": {
+        "reviews": 22,
+        "rows": 347
+      },
+      "validation": {
+        "reviews": 3,
+        "rows": 43
+      },
+      "test": {
+        "reviews": 3,
+        "rows": 33
+      }
+    },
+    {
+      "source": "data/absa/train/hp_pavilion_g7_absa_full.csv",
+      "train": {
+        "reviews": 44,
+        "rows": 431
+      },
+      "validation": {
+        "reviews": 6,
+        "rows": 60
+      },
+      "test": {
+        "reviews": 6,
+        "rows": 67
+      }
+    },
+    {
+      "source": "data/absa/train/lenovo_b50_30_absa_full.csv",
+      "train": {
+        "reviews": 45,
+        "rows": 626
+      },
+      "validation": {
+        "reviews": 6,
+        "rows": 117
+      },
+      "test": {
+        "reviews": 6,
+        "rows": 78
+      }
+    },
+    {
+      "source": "data/absa/train/pantum_m6500w_absa_full.csv",
+      "train": {
+        "reviews": 54,
+        "rows": 717
+      },
+      "validation": {
+        "reviews": 7,
+        "rows": 87
+      },
+      "test": {
+        "reviews": 7,
+        "rows": 140
+      }
+    },
+    {
+      "source": "data/absa/train/samsung_rv515_absa_full.csv",
+      "train": {
+        "reviews": 37,
+        "rows": 358
+      },
+      "validation": {
+        "reviews": 4,
+        "rows": 92
+      },
+      "test": {
+        "reviews": 4,
+        "rows": 51
+      }
+    },
+    {
+      "source": "data/absa/train/smart_watch_x8_pro_absa_full.csv",
+      "train": {
+        "reviews": 31,
+        "rows": 390
+      },
+      "validation": {
+        "reviews": 4,
+        "rows": 67
+      },
+      "test": {
+        "reviews": 4,
+        "rows": 111
+      }
+    },
+    {
+      "source": "data/absa/train/tecno_megabook_t1_absa_full.csv",
+      "train": {
+        "reviews": 24,
+        "rows": 428
+      },
+      "validation": {
+        "reviews": 3,
+        "rows": 16
+      },
+      "test": {
+        "reviews": 3,
+        "rows": 21
+      }
+    },
+    {
+      "source": "data/absa/train/tws_i9s_absa_full.csv",
+      "train": {
+        "reviews": 92,
+        "rows": 998
+      },
+      "validation": {
+        "reviews": 12,
+        "rows": 123
+      },
+      "test": {
+        "reviews": 12,
+        "rows": 120
+      }
+    },
+    {
+      "source": "data/absa/train/xiaomi_mi_band_absa_full.csv",
+      "train": {
+        "reviews": 153,
+        "rows": 2352
+      },
+      "validation": {
+        "reviews": 19,
+        "rows": 212
+      },
+      "test": {
+        "reviews": 19,
+        "rows": 237
+      }
+    },
+    {
+      "source": "data/absa/train/xiaomi_redmi_airdots_absa_full.csv",
+      "train": {
+        "reviews": 418,
+        "rows": 4849
+      },
+      "validation": {
+        "reviews": 52,
+        "rows": 576
+      },
+      "test": {
+        "reviews": 52,
+        "rows": 668
+      }
+    }
+  ],
+  "totals": {
+    "train": {
+      "rows": 19278,
+      "reviews": 1427
+    },
+    "validation": {
+      "rows": 2502,
+      "reviews": 180
+    },
+    "test": {
+      "rows": 2445,
+      "reviews": 180
+    }
+  }
+}

@@ -88,7 +88,7 @@ def load_examples(paths: list[Path], allowed_statuses: set[str] | None = None) -
                 seen.add(key)
                 examples.append(
                     AspectExample(
-                        source_file=path.name,
+                        source_file=row.get("source_dataset", "").strip() or path.name,
                         review_id=row["review_id"],
                         text=text,
                         aspect=aspect,

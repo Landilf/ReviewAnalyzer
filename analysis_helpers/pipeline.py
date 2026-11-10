@@ -61,7 +61,11 @@ def normalize_sentiment(label: str) -> str:
 def ensure_review_columns(data: pd.DataFrame) -> pd.DataFrame:
     prepared = data.copy()
     if "text" not in prepared.columns:
-        text_candidates = [column for column in prepared.columns if prepared[column].dtype == "object"]
+        text_candidates = [
+            column
+            for column in prepared.columns
+            if pd.api.types.is_object_dtype(prepared[column]) or pd.api.types.is_string_dtype(prepared[column])
+        ]
         if not text_candidates:
             raise ValueError("В наборе данных нужен столбец с текстом отзыва.")
         prepared = prepared.rename(columns={text_candidates[0]: "text"})

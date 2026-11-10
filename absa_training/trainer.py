@@ -19,6 +19,16 @@ from absa_training.metrics import build_absa_metrics, primary_scores
 
 
 ProgressCallback = Callable[[float, str], None] | None
+CancelCheck = Callable[[], bool] | None
+
+
+class TrainingCancelled(RuntimeError):
+    """Raised when a user requests a safe stop between training operations."""
+
+
+def _check_cancel(cancel_check: CancelCheck) -> None:
+    if cancel_check is not None and cancel_check():
+        raise TrainingCancelled("Обучение отменено пользователем.")
 
 
 @dataclass(frozen=True)
@@ -48,6 +58,20 @@ def _write_history(run_dir: Path, history: list[dict], best_epoch: int) -> None:
         writer.writerows(history)
     os.replace(temporary_path, history_path)
     _write_json(run_dir / "history.json", {"epochs": history, "best_epoch": best_epoch})
+
+
+def mark_run_status(run_dir: Path, status: str, error: str | None = None) -> None:
+    """Persist a terminal status even if setup failed before the epoch loop."""
+    manifest_path = run_dir / "run_manifest.json"
+    if not manifest_path.is_file():
+        return
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["status"] = status
+    if error:
+        manifest["error"] = error
+    elif status == "cancelled":
+        manifest.pop("error", None)
+    _write_json(manifest_path, manifest)
 
 
 def _checkpoint_epochs(run_dir: Path) -> list[int]:
@@ -104,7 +128,7 @@ class _Dataset:
         return item
 
 
-def _evaluate(model, loader, device, labels: list[str]) -> tuple[dict, float]:
+def _evaluate(model, loader, device, labels: list[str], cancel_check: CancelCheck = None) -> tuple[dict, float]:
     import torch
 
     model.eval()
@@ -113,6 +137,7 @@ def _evaluate(model, loader, device, labels: list[str]) -> tuple[dict, float]:
     losses: list[float] = []
     with torch.no_grad():
         for batch in loader:
+            _check_cancel(cancel_check)
             batch = {name: value.to(device) for name, value in batch.items()}
             output = model(**batch)
             losses.append(float(output.loss.item()))
@@ -175,7 +200,12 @@ def fine_tune(
     run_dir: Path,
     config: TrainingConfig,
     source_files: list[str],
+    validation_examples: list[AspectExample] | None = None,
+    test_examples: list[AspectExample] | None = None,
+    validation_files: list[str] | None = None,
+    test_files: list[str] | None = None,
     progress_callback: ProgressCallback = None,
+    cancel_check: CancelCheck = None,
     resume_epoch: int | None = None,
     initial_checkpoint: Path | None = None,
 ) -> dict:
@@ -189,10 +219,24 @@ def fine_tune(
         raise ValueError("epochs и batch_size должны иметь допустимые положительные значения.")
     if resume_epoch is not None and initial_checkpoint is not None:
         raise ValueError("Нельзя одновременно продолжать запуск и выбирать другую стартовую эпоху.")
+    _check_cancel(cancel_check)
     _seed_everything(config.random_state)
-    train_examples, validation_examples = split_by_review(examples, config.validation_fraction, config.random_state)
+    if validation_examples is None:
+        train_examples, validation_examples = split_by_review(examples, config.validation_fraction, config.random_state)
+        validation_mode = "internal"
+    else:
+        train_examples = examples
+        validation_mode = "external"
+    if not validation_examples:
+        raise ValueError("Для обучения нужна хотя бы одна строка валидации.")
     labels = sorted({example.label for example in examples})
     label_to_id = {label: index for index, label in enumerate(labels)}
+    for dataset_name, evaluation_examples in (("validation", validation_examples), ("test", test_examples or [])):
+        unsupported = sorted({example.label for example in evaluation_examples} - set(labels))
+        if unsupported:
+            raise ValueError(
+                f"В {dataset_name} есть метки, которых нет в train: {', '.join(unsupported[:8])}."
+            )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     manifest_path = run_dir / "run_manifest.json"
     is_resuming = resume_epoch is not None
@@ -205,6 +249,9 @@ def fine_tune(
         checkpoint_dir = run_dir / "epochs" / f"epoch-{resume_epoch:03d}"
         if not (checkpoint_dir / "training_state.pt").is_file():
             raise ValueError(f"Нельзя продолжить: не найдена завершённая эпоха {resume_epoch}.")
+        if progress_callback is not None:
+            progress_callback(0.02, f"Восстановление модели после эпохи {resume_epoch}")
+        _check_cancel(cancel_check)
         tokenizer = AutoTokenizer.from_pretrained(checkpoint_dir)
         model = AutoModelForSequenceClassification.from_pretrained(checkpoint_dir)
         start_epoch = resume_epoch + 1
@@ -215,17 +262,24 @@ def fine_tune(
         manifest = {
             "created_at": datetime.now(UTC).isoformat(),
             "source_files": source_files,
+            "validation_files": validation_files or [],
+            "test_files": test_files or [],
+            "validation_mode": validation_mode,
             "config": asdict(config),
             "device": str(device),
             "labels": labels,
             "train_examples": len(train_examples),
             "validation_examples": len(validation_examples),
+            "test_examples": len(test_examples or []),
             "active_epoch": None,
             "active_checkpoint": None,
             "last_completed_epoch": 0,
             "status": "running",
         }
         _write_json(manifest_path, manifest)
+        if progress_callback is not None:
+            progress_callback(0.02, "Разметка проверена; загрузка базовой модели")
+        _check_cancel(cancel_check)
         if initial_checkpoint is None:
             tokenizer = AutoTokenizer.from_pretrained(config.model_name)
             tokenizer.add_special_tokens({"additional_special_tokens": ["[ASPECT]", "[/ASPECT]"]})
@@ -250,6 +304,7 @@ def fine_tune(
         manifest["initialization"] = initialization
         _write_json(manifest_path, manifest)
     model.to(device)
+    _check_cancel(cancel_check)
 
     def build_loader(items: list[AspectExample], shuffle: bool) -> DataLoader:
         encodings = tokenizer(
@@ -277,7 +332,7 @@ def fine_tune(
     manifest.pop("error", None)
     _write_json(manifest_path, manifest)
     if progress_callback is not None:
-        progress_callback(0.0, "Подготовка модели и набора данных")
+        progress_callback(0.04, "Модель загружена; подготовка батчей")
     best_epoch = max((item["epoch"] for item in history), default=0)
     best_score = max((item["joint_macro_f1"] for item in history), default=float("-inf"))
     try:
@@ -285,6 +340,7 @@ def fine_tune(
         model.train()
         losses: list[float] = []
         for batch_index, batch in enumerate(train_loader, start=1):
+            _check_cancel(cancel_check)
             batch = {name: value.to(device) for name, value in batch.items()}
             optimizer.zero_grad()
             output = model(**batch)
@@ -296,7 +352,7 @@ def fine_tune(
             if progress_callback is not None:
                 completed = ((epoch - 1) + batch_index / len(train_loader)) / config.epochs
                 progress_callback(completed * 0.9, f"Эпоха {epoch}/{config.epochs}: batch {batch_index}/{len(train_loader)}")
-        metrics, validation_loss = _evaluate(model, validation_loader, device, labels)
+        metrics, validation_loss = _evaluate(model, validation_loader, device, labels, cancel_check=cancel_check)
         scores = primary_scores(metrics)
         epoch_record = {
             "epoch": epoch,
@@ -315,9 +371,9 @@ def fine_tune(
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest["last_completed_epoch"] = epoch
         _write_json(manifest_path, manifest)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, TrainingCancelled) as interruption:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        manifest["status"] = "interrupted"
+        manifest["status"] = "cancelled" if isinstance(interruption, TrainingCancelled) else "interrupted"
         manifest["last_completed_epoch"] = max((item["epoch"] for item in history), default=0)
         _write_json(manifest_path, manifest)
         raise
@@ -332,12 +388,36 @@ def fine_tune(
     manifest["status"] = "completed"
     _write_json(manifest_path, manifest)
     activate_epoch(run_dir, best_epoch)
+    test_scores = None
+    if test_examples:
+        if progress_callback is not None:
+            progress_callback(0.96, f"Итоговая проверка лучшей эпохи {best_epoch} на test")
+        best_checkpoint = run_dir / "epochs" / f"epoch-{best_epoch:03d}"
+        best_model = AutoModelForSequenceClassification.from_pretrained(best_checkpoint).to(device)
+        test_loader = build_loader(test_examples, shuffle=False)
+        test_metrics, test_loss = _evaluate(best_model, test_loader, device, labels, cancel_check=cancel_check)
+        test_scores = primary_scores(test_metrics)
+        _write_json(
+            run_dir / "test_metrics.json",
+            {
+                "evaluated_epoch": best_epoch,
+                "test_loss": test_loss,
+                **test_metrics,
+            },
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["test_evaluated_epoch"] = best_epoch
+        _write_json(manifest_path, manifest)
     if progress_callback is not None:
         progress_callback(1.0, f"Обучение завершено; выбрана эпоха {best_epoch}")
-    return {"run_dir": str(run_dir), "best_epoch": best_epoch, "history": history}
+    return {"run_dir": str(run_dir), "best_epoch": best_epoch, "history": history, "test_scores": test_scores}
 
 
-def resume_fine_tune(run_dir: Path, progress_callback: ProgressCallback = None) -> dict:
+def resume_fine_tune(
+    run_dir: Path,
+    progress_callback: ProgressCallback = None,
+    cancel_check: CancelCheck = None,
+) -> dict:
     """Continue a failed or interrupted run from its last complete epoch."""
     manifest_path = run_dir / "run_manifest.json"
     if not manifest_path.is_file():
@@ -351,7 +431,15 @@ def resume_fine_tune(run_dir: Path, progress_callback: ProgressCallback = None) 
         raise ValueError("Все запланированные эпохи уже завершены.")
     source_files = [Path(path) for path in manifest["source_files"]]
     examples = load_examples(source_files)
+    validation_files = [Path(path) for path in manifest.get("validation_files", [])]
+    test_files = [Path(path) for path in manifest.get("test_files", [])]
+    validation_examples = load_examples(validation_files) if validation_files else None
+    test_examples = load_examples(test_files) if test_files else None
     return fine_tune(
         examples, run_dir, TrainingConfig(**manifest["config"]), manifest["source_files"],
-        progress_callback=progress_callback, resume_epoch=last_epoch,
+        validation_examples=validation_examples,
+        test_examples=test_examples,
+        validation_files=manifest.get("validation_files", []),
+        test_files=manifest.get("test_files", []),
+        progress_callback=progress_callback, cancel_check=cancel_check, resume_epoch=last_epoch,
     )

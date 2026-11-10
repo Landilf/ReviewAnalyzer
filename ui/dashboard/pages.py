@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from typing import Mapping
 from urllib.parse import urlparse
 
@@ -190,7 +191,7 @@ def render_brief_overview(filtered: pd.DataFrame, insights: list[str], recommend
 
 
 def render_loader() -> None:
-    st.subheader("Входные данные")
+    st.subheader("2. Входные данные")
     tabs = st.tabs(["Ссылка", "Файл", "Текст"])
 
     with tabs[0]:
@@ -215,6 +216,10 @@ def render_loader() -> None:
                 value=False,
                 help="Если выключить, откроется окно браузера. Это помогает пройти капчу или увидеть причину блокировки.",
             )
+            novnc_url = os.getenv("REVIEW_ANALYZER_NOVNC_URL")
+            if not headless and novnc_url:
+                st.caption("Откройте окно краулера в отдельной вкладке перед запуском, чтобы пройти капчу при необходимости.")
+                st.link_button("Открыть окно краулера", novnc_url, use_container_width=True)
             parse_clicked = st.button("Загрузить и проанализировать", type="primary", key="url_import_button")
 
         if parse_clicked:

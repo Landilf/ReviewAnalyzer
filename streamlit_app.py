@@ -29,7 +29,8 @@ from ui.dashboard.pages import (
     render_reviews,
 )
 from ui.dashboard.services import run_advanced_analysis_for_result, run_analysis_from_frame
-from ui.dashboard.training import render_training_sidebar
+from ui.dashboard.training import render_training_page
+from ui.dashboard.experiment import render_experiment_page
 
 
 st.set_page_config(
@@ -41,12 +42,52 @@ st.set_page_config(
 logger = setup_logging()
 
 
+def _select_app_mode(mode: str) -> None:
+    """Update navigation before Streamlit redraws the sidebar buttons."""
+    st.session_state["app_mode"] = mode
+
+
 def main() -> None:
     logger.info("Streamlit app started")
-    render_training_sidebar()
+    with st.sidebar:
+        st.markdown("## Review Analyzer")
+        st.caption("Отзывы, тональность и ABSA-модели в одном рабочем пространстве.")
+        section = st.session_state.get("app_mode", "analysis")
+        analysis_button, training_button = st.columns(2)
+        with analysis_button:
+            st.button(
+                "📊 Анализ", use_container_width=True,
+                type="primary" if section == "analysis" else "secondary",
+                on_click=_select_app_mode, args=("analysis",), key="app_mode_analysis",
+            )
+        with training_button:
+            st.button(
+                "🧠 Обучение", use_container_width=True,
+                type="primary" if section == "training" else "secondary",
+                on_click=_select_app_mode, args=("training",), key="app_mode_training",
+            )
+        st.button(
+            "🧪 Эксперимент", use_container_width=True,
+            type="primary" if section == "experiment" else "secondary",
+            on_click=_select_app_mode, args=("experiment",), key="app_mode_experiment",
+        )
+        if section == "analysis":
+            st.caption("Загрузка отзывов и исследование результатов")
+        elif section == "training":
+            st.caption("Дообучение и сравнение сохранённых эпох")
+        else:
+            st.caption("Воспроизводимое сравнение правил и ABSA-модели")
+
+    if section == "training":
+        render_training_page()
+        return
+    if section == "experiment":
+        render_experiment_page()
+        return
+
     render_header()
-    render_loader()
     options = render_analysis_settings()
+    render_loader()
     logger.info(
         "Analysis settings: method=%s model=RuBERT tiny",
         options["method"],

@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from absa_training.data import load_examples, split_by_review
+from absa_training.legacy_baseline import legacy_taxonomy
 from absa_training.metrics import build_absa_metrics, primary_scores
 from absa_training.trainer import activate_epoch
 
@@ -45,6 +46,23 @@ class AbsATrainingTests(unittest.TestCase):
         self.assertTrue({item.group_id for item in train}.isdisjoint({item.group_id for item in validation}))
         self.assertEqual(len(train) + len(validation), len(examples))
 
+    def test_loader_uses_source_dataset_for_review_grouping_in_merged_csv(self):
+        """A merged validation/test CSV must retain identities of its source datasets."""
+        with tempfile.TemporaryDirectory() as directory_name:
+            path = Path(directory_name) / "validation.csv"
+            fields = [
+                "review_id", "text", "aspect", "aspect_normalized", "aspect_start", "aspect_end",
+                "aspect_sentiment", "annotation_status", "source_dataset",
+            ]
+            with path.open("w", encoding="utf-8-sig", newline="") as file:
+                writer = csv.writer(file)
+                writer.writerow(fields)
+                writer.writerow(["1", "Хорошая камера", "камера", "камера", "8", "14", "positive", "accepted", "phone.csv"])
+            example = load_examples([path])[0]
+
+        self.assertEqual(example.source_file, "phone.csv")
+        self.assertEqual(example.group_id, "phone.csv:1")
+
     def test_metrics_include_taxonomy_and_taxonomy_conditioned_sentiment(self):
         metrics = build_absa_metrics(
             ["камера::positive", "аккумулятор::negative", "камера::negative"],
@@ -55,6 +73,11 @@ class AbsATrainingTests(unittest.TestCase):
         self.assertIn("камера", metrics["per_taxonomy"])
         self.assertIn("precision", metrics["taxonomy"]["камера"])
         self.assertIn("joint_macro_f1", primary_scores(metrics))
+
+    def test_legacy_baseline_normalizes_known_terms_without_guessing_unknowns(self):
+        self.assertEqual(legacy_taxonomy("фотографии"), "камера")
+        self.assertEqual(legacy_taxonomy("батарея"), "аккумулятор")
+        self.assertIsNone(legacy_taxonomy("геймпад"))
 
     def test_activate_epoch_updates_manifest_without_deleting_checkpoints(self):
         with tempfile.TemporaryDirectory() as directory_name:
